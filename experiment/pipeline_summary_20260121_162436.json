@@ -1,0 +1,13 @@
+{
+  "timestamp": "2026-01-21T16:24:35.777472",
+  "datasets": [
+    "basket"
+  ],
+  "seed": 2864,
+  "stages": {
+    "preprocessing": "completed",
+    "fold_mapping": "completed",
+    "experiments": "completed",
+    "aggregation": "failed"
+  }
+}
