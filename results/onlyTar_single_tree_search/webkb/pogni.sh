@@ -1,9 +1,0 @@
- python  /media/sf_deljeno/arcrunnerhacks/clusterJobTest.py -x fold1/krog1.xrsl -i True -c True -e True -j True
- python  /media/sf_deljeno/arcrunnerhacks/clusterJobTest.py -x fold2/krog1.xrsl -i True -c True -e True -j True
- python  /media/sf_deljeno/arcrunnerhacks/clusterJobTest.py -x fold3/krog1.xrsl -i True -c True -e True -j True
- python  /media/sf_deljeno/arcrunnerhacks/clusterJobTest.py -x fold4/krog1.xrsl -i True -c True -e True -j True
- python  /media/sf_deljeno/arcrunnerhacks/clusterJobTest.py -x fold5/krog1.xrsl -i True -c True -e True -j True
- python  /media/sf_deljeno/arcrunnerhacks/clusterJobTest.py -x fold6/krog1.xrsl -i True -c True -e True -j True
- python  /media/sf_deljeno/arcrunnerhacks/clusterJobTest.py -x fold7/krog1.xrsl -i True -c True -e True -j True
- python  /media/sf_deljeno/arcrunnerhacks/clusterJobTest.py -x fold8/krog1.xrsl -i True -c True -e True -j True
- python  /media/sf_deljeno/arcrunnerhacks/clusterJobTest.py -x fold9/krog1.xrsl -i True -c True -e True -j True

@@ -1,3 +1,0 @@
-train,test
-cannot do
-['course', 'course', 'course', 'course', 'course', 'course', 'course', 'course', 'course', 'course', 'course', 'course', 'course', 'course', 'course', 'course', 'course', 'course', 'course', 'course', 'course', 'course', 'course', 'course', 'faculty', 'student', 'student', 'course', 'course', 'course', 'course', 'faculty', 'faculty', 'course', 'faculty', 'course', 'faculty', 'student', 'course', 'course', 'faculty', 'faculty', 'student', 'student', 'faculty', 'course', 'student', 'faculty', 'faculty', 'course']

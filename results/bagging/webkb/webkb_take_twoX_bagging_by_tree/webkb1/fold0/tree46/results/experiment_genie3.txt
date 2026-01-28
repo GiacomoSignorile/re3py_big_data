@@ -1,9 +1,0 @@
-Attributes
-page_has_term[X,C]:  2.44498e+00 ; iterations: [ 2.44498e+00 ]
-
-Attributes summed
-page_has_term     :  2.44498e+00 ; iterations: [ 2.44498e+00 ]
-
-Aggregators
-sum               :  2.44498e+00 ; iterations: [ 2.44498e+00 ]
-

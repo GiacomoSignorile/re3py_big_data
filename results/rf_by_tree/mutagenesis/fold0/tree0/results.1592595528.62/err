@@ -1,9 +1,0 @@
-Traceback (most recent call last):
-  File "run_experiment_by_tree.py", line 107, in <module>
-    learner.compute_ranking(EnsembleRanking.genie3).print_ranking("experiment_genie3.txt")
-  File "/media/sf_E_DRIVE/relational_ranking/experiments/rf_by_tree/mutagenesis/fold0/tree0/vrh_dviguje_svoj_v_oblake_mutagenesis_0_0/core.py", line 1141, in compute_ranking
-    feature_ranking.update_attributes(attribute_scores, aggregate_scores, 1)
-  File "/media/sf_E_DRIVE/relational_ranking/experiments/rf_by_tree/mutagenesis/fold0/tree0/vrh_dviguje_svoj_v_oblake_mutagenesis_0_0/ensemble_ranking.py", line 50, in update_attributes
-    d_all[k][iteration] += v
-IndexError: list index out of range
-
