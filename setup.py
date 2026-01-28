@@ -12,7 +12,7 @@ def parse_requirements(file):
     return required_packages
 
 packages = [x for x in find_packages() if x != "test"]
-setup(name='re3py',
+setup(name='rrank',
       version='0.34',
       description="Relational ranking",
       url='https://github.com/re3py/re3py',

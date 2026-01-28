@@ -1,1 +1,1 @@
-sudo singularity build ranking.sif environment.env
+sudo apptainer build ranking.sif environment.env

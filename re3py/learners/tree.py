@@ -12,7 +12,7 @@ from ..utilities.my_utils import *
 import itertools
 import random
 from .predictive_model import PredictiveModel
-from time import clock
+from time import perf_counter as clock  # Python 3.8+ compatibility
 import math
 import copy
 from .core.tree_node_split import TEST_VALUE_MEMO

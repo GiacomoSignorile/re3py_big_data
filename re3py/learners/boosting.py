@@ -1,9 +1,9 @@
-from rrank.learners.tree import DecisionTree, create_constant_tree
-from learners.predictive_model import TreeEnsemble
-from learners.core.heuristic import *
+from .tree import DecisionTree, create_constant_tree
+from .predictive_model import TreeEnsemble
+from .core.heuristic import *
 from math import exp, log
-from rrank.ranking.ensemble_ranking import EnsembleRanking
-from data.data_and_statistics import get_all_target_values
+from ..ranking.ensemble_ranking import EnsembleRanking
+from ..data.data_and_statistics import get_all_target_values
 
 
 class GradientBoostingTask:
