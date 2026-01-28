@@ -8,7 +8,7 @@ data/datasets/yelp_big/yelp_big_descriptive.txt
 __pycache__/
 *.py[cod]
 *$py.class
-
+venv/
 .idea
 
 # C extensions
