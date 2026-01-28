@@ -31,7 +31,9 @@ class PipelineOrchestrator:
         self.dataset_names = dataset_names
         self.seed = seed
         self.base_dir = Path(__file__).parent
-        self.log_file = self.base_dir / f"pipeline_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        self.logs_dir = self.base_dir.parent / "logs"
+        self.logs_dir.mkdir(parents=True, exist_ok=True)
+        self.log_file = self.logs_dir / f"pipeline_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
         self.results_summary = {
             'timestamp': datetime.now().isoformat(),
             'datasets': dataset_names,
@@ -205,7 +207,7 @@ class PipelineOrchestrator:
         self.log(f"Log file: {self.log_file}")
         
         # Save summary
-        summary_file = self.base_dir / f"pipeline_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        summary_file = self.logs_dir / f"pipeline_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
         with open(summary_file, 'w') as f:
             json.dump(self.results_summary, f, indent=2)
         

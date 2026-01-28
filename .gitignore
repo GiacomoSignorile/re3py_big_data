@@ -1,14 +1,18 @@
 # my ignore
-data/datasets/yelp_big/yelp_big_descriptive.txt
+data/datasets/
+data/folds/
+data/data_reduced/
+data/
 
+logs/
 
-
+experiment/results/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
-venv/
+
 .idea
 
 # C extensions
@@ -135,6 +139,3 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
-data/datasets/
-data/folds/
-results/
