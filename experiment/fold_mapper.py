@@ -22,10 +22,11 @@ class FoldMapper:
         """Initialize fold mapper."""
         self.dataset_name = dataset_name
         
-        # Paths
-        self.base_dir = Path(__file__).parent.parent
+        # Paths - use absolute path resolution
+        script_dir = Path(__file__).resolve().parent  # experiment directory
+        self.base_dir = script_dir.parent  # project root
         self.folds_dir = self.base_dir / "data" / "folds" / dataset_name
-        self.scarcity_dir = Path(__file__).parent / "data_reduced" / dataset_name
+        self.scarcity_dir = self.base_dir / "data" / "data_reduced" / dataset_name  # centralized data location
         self.metadata_dir = self.scarcity_dir / "metadata"
         
         # Find fold file

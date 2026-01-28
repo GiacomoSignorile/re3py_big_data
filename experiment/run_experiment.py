@@ -52,9 +52,10 @@ class DataScarcityExperiment:
             log_dir: Directory for logging results
         """
         self.dataset_name = dataset_name
-        self.base_dir = Path(__file__).parent.parent
+        script_dir = Path(__file__).resolve().parent  # experiment directory
+        self.base_dir = script_dir.parent  # project root
         self.dataset_dir = self.base_dir / "data" / "datasets" / dataset_name
-        self.scarcity_dir = Path(__file__).parent / "data_reduced" / dataset_name
+        self.scarcity_dir = self.base_dir / "data" / "data_reduced" / dataset_name  # centralized data location
         
         # Ensure reduced data exists
         if not self.scarcity_dir.exists():
@@ -62,7 +63,7 @@ class DataScarcityExperiment:
         
         # Results directory
         if log_dir is None:
-            log_dir = Path(__file__).parent / "results" / dataset_name
+            log_dir = self.base_dir / "experiment" / "results" / dataset_name
         self.log_dir = log_dir
         self.log_dir.mkdir(parents=True, exist_ok=True)
         
@@ -140,11 +141,11 @@ class DataScarcityExperiment:
             raise FileNotFoundError(f"Folds file not found: {folds_file}")
         
         try:
-            settings = self.load_task_settings()
+            # Use s_file directly for initialization
             dataset = Dataset(
-                settings=settings,
+                s_file=str(self.schema_file),
                 data_file=str(self.descriptive_file),
-                target_data_file=str(target_file)
+                target_file=str(target_file)
             )
             return dataset, target_file, folds_file
         except Exception as e:

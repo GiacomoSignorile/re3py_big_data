@@ -40,10 +40,11 @@ class DataScarcityPreprocessor:
         self.seed = seed
         random.seed(seed)
         
-        # Base paths
-        self.base_dir = Path(__file__).parent.parent
+        # Base paths - use absolute path resolution
+        script_dir = Path(__file__).resolve().parent  # experiment directory
+        self.base_dir = script_dir.parent  # project root
         self.dataset_dir = self.base_dir / "data" / "datasets" / dataset_name
-        self.scarcity_dir = Path(__file__).parent / "data_reduced"
+        self.scarcity_dir = self.base_dir / "data" / "data_reduced"  # centralized data location
         self.scarcity_dir.mkdir(parents=True, exist_ok=True)
         
         # Output directories
