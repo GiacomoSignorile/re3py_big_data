@@ -23,7 +23,9 @@ computing all metrics through the standard Evaluator classes.
 
 import argparse
 import csv
+import io
 import json
+import logging
 import sys
 import traceback
 from datetime import datetime
@@ -83,6 +85,9 @@ class DataScarcityExperiment:
             log_dir = self.base_dir / "experiment" / "results" / dataset_name
         self.log_dir = log_dir
         self.log_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Setup logging
+        self._setup_logger()
 
         # Find schema file (.s)
         self.schema_file = self._find_schema_file()
@@ -95,7 +100,7 @@ class DataScarcityExperiment:
             raise FileNotFoundError(f"No descriptive file found for {dataset_name}")
 
         # Reduction percentages
-        self.reduction_percentages = [10, 20, 50, 70, 90]
+        self.reduction_percentages = [0, 10, 20, 50, 70, 90]
 
         # Results storage
         self.results = {
@@ -103,11 +108,42 @@ class DataScarcityExperiment:
                 "dataset": dataset_name,
                 "model": "Bagging",
                 "validation": "10-fold CV",
-                "metrics": ["accuracy", "precision", "recall", "f1", "mse", "mae", "rmse"],
+                "metrics": ["accuracy_mean","accuracy_std"],
                 "timestamp": datetime.now().isoformat(),
             },
             "results_by_reduction": {},
         }
+    
+    def _setup_logger(self):
+        """Setup logger to write to file and console."""
+        self.logger = logging.getLogger(f"experiment_{self.dataset_name}")
+        self.logger.setLevel(logging.DEBUG)
+        
+        # Create logs directory
+        logs_dir = self.base_dir / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        
+        # File handler
+        log_file = logs_dir / f"bagging_{self.dataset_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setLevel(logging.DEBUG)
+        
+        # Console handler
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setLevel(logging.INFO)
+        
+        # Formatter
+        formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
+        file_handler.setFormatter(formatter)
+        console_handler.setFormatter(formatter)
+        
+        # Add handlers
+        if not self.logger.handlers:
+            self.logger.addHandler(file_handler)
+            self.logger.addHandler(console_handler)
 
     def _load_folds_list(self, folds_file: Path, dataset: Dataset) -> List[List[str]]:
         """Load folds from file and filter to IDs present in the dataset."""
@@ -155,6 +191,22 @@ class DataScarcityExperiment:
             if f.exists():
                 return f
         return None
+    
+    def _find_original_target_file(self) -> Path:
+        """Find original target file."""
+        patterns = [f"{self.dataset_name}_target.txt", "muta188_target.txt"]
+        for pattern in patterns:
+            f = self.dataset_dir / pattern
+            if f.exists():
+                return f
+        raise FileNotFoundError(f"No original target file found for {self.dataset_name}")
+    
+    def _find_original_folds_file(self) -> Path:
+        """Find original folds file."""
+        f = self.base_dir / "data" / "folds" / self.dataset_name / "folds1.txt"
+        if f.exists():
+            return f
+        raise FileNotFoundError(f"No original folds file found for {self.dataset_name}")
 
     def load_task_settings(self) -> Settings:
         """Load task settings from schema file."""
@@ -171,12 +223,16 @@ class DataScarcityExperiment:
 
         Args:
             percentage: Percentage of data removed (10, 20, 50, 70, 90)
-
+the mode
         Returns:
             Tuple of (Dataset, target_file, folds_file)
         """
-        target_file = self.scarcity_dir / f"target_removed_{percentage:02d}.txt"
-        folds_file = self.scarcity_dir / "folds" / f"folds_removed_{percentage:02d}.txt"
+        if percentage == 0:
+            target_file = self._find_original_target_file()
+            folds_file = self._find_original_folds_file()
+        else:
+            target_file = self.scarcity_dir / f"target_removed_{percentage:02d}.txt"
+            folds_file = self.scarcity_dir / "folds" / f"folds_removed_{percentage:02d}.txt"
 
         if not target_file.exists():
             raise FileNotFoundError(f"Target file not found: {target_file}")
@@ -200,7 +256,7 @@ class DataScarcityExperiment:
         dataset: Dataset,
         folds_file: Path,
         percentage: int,
-        max_depth: int = 5,
+        max_depth: int = 1000,
         n_estimators: int = 50,
         shrinkage: float = 0.1,
     ) -> Dict[str, Any]:
@@ -223,6 +279,7 @@ class DataScarcityExperiment:
         print(f"{'=' * 70}")
 
         fold_results = []
+        self.logger.info(f"Starting Bagging on {percentage}% reduced data")
 
         try:
             folds_path = self.original_folds_file if self.use_original_folds else folds_file
@@ -243,15 +300,46 @@ class DataScarcityExperiment:
                 print(f"\n--- Fold {fold_idx + 1}/{len(folds_list)} ---")
                 print(f"Train: {len(train_data.get_target_data())} examples")
                 print(f"Test: {len(test_data.get_target_data())} examples")
+                self.logger.info(f"Fold {fold_idx + 1}/{len(folds_list)} - Train: {len(train_data.get_target_data())}, Test: {len(test_data.get_target_data())}")
 
                 try:
+                    settings = self.load_task_settings()
+                    
+                    raw = settings.get_tree_parameters()  # numNodes, minInstancesNode, maxDepth, maxTestLength
+                    # depth = 2
+                    # tnum = 6
+                    tree_params = {
+                        #'max_number_atom_tests': tnum,
+                        'allowed_atom_tests': settings.get_atom_tests_structured(),
+                        'allowed_aggregators': settings.get_aggregates(),
+                        'minimal_examples_in_leaf': 1,
+                        'java_port': None,  # 22222,
+                        #'max_depth': depth,
+                        "per_class_bootstrap": True,
+                        "only_existential": True
+                    }
+
                     rf_model = RandomForest(
-                        nb_trees_to_build=n_estimators,  # es. 50 alberi come nel paper [file:1]
+                        nb_trees_to_build=n_estimators, 
                         votes_aggregator=RandomForest.proportions_aggregator,
                         random_seed=2864,
                         heuristic=HeuristicGini(),
+                        **tree_params
                     )
-                    rf_model.build(train_data)
+                    
+                    # Capture tree building output and log it
+                    self.logger.debug(f"Starting RandomForest build for fold {fold_idx + 1}")
+                    captured_output = io.StringIO()
+                    original_stdout = sys.stdout
+                    try:
+                        sys.stdout = captured_output
+                        rf_model.build(train_data)
+                    finally:
+                        sys.stdout = original_stdout
+                        build_output = captured_output.getvalue()
+                        if build_output:
+                            self.logger.debug(f"Tree building output for fold {fold_idx + 1}:\n{build_output}")
+                        captured_output.close()
 
                     # Make predictions on test data
                     test_instances = test_data.get_target_data()
@@ -280,9 +368,11 @@ class DataScarcityExperiment:
 
                     fold_results.append(fold_result)
                     print(f"  Accuracy: {fold_result['accuracy']:.4f}")
+                    self.logger.info(f"Fold {fold_idx + 1} completed - Accuracy: {fold_result['accuracy']:.4f}")
 
                 except Exception as e:
                     print(f"  Error in fold {fold_idx + 1}: {e}")
+                    self.logger.error(f"Error in fold {fold_idx + 1}: {e}", exc_info=True)
                     traceback.print_exc()
                     continue
 
@@ -295,6 +385,7 @@ class DataScarcityExperiment:
 
         except Exception as e:
             print(f"Error running CV: {e}")
+            self.logger.error(f"Error running CV: {e}", exc_info=True)
             traceback.print_exc()
             return None
 
@@ -413,6 +504,7 @@ class DataScarcityExperiment:
 
             except Exception as e:
                 print(f"\nError processing {percentage}% reduction: {e}")
+                self.logger.error(f"Error processing {percentage}% reduction: {e}", exc_info=True)
                 traceback.print_exc()
                 continue
 
@@ -425,6 +517,7 @@ class DataScarcityExperiment:
         with open(summary_file, "w") as f:
             json.dump(self.results, f, indent=2)
         print(f"\n✓ Saved summary: {summary_file}")
+        self.logger.info(f"Saved summary: {summary_file}")
 
         csv_file = self.log_dir / "results_bagging.csv"
         with open(csv_file, "w", newline="") as f:
@@ -442,12 +535,14 @@ class DataScarcityExperiment:
                 )
 
         print(f"✓ Saved CSV: {csv_file}")
+        self.logger.info(f"Saved CSV: {csv_file}")
 
         # Log file
         log_file = self.log_dir / "experiment_bagging.log"
         with open(log_file, "w") as f:
             f.write(str(self.results))
         print(f"✓ Saved log: {log_file}")
+        self.logger.info(f"Experiment completed successfully")
 
 
 def main():
@@ -487,10 +582,13 @@ def main():
             experiment = DataScarcityExperiment(
                 dataset, args.log_dir, use_original_folds=args.use_original_folds
             )
+            experiment.logger.info(f"Starting experiment for dataset: {dataset}")
             experiment.run_all_reductions()
             experiment.save_results()
+            experiment.logger.info(f"Successfully completed experiment for dataset: {dataset}")
         except Exception as e:
             print(f"Error running experiment for {dataset}: {e}")
+            logging.getLogger(f"experiment_{dataset}").error(f"Error running experiment: {e}", exc_info=True)
             traceback.print_exc()
             continue
 
