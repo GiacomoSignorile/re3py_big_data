@@ -96,7 +96,7 @@ class DataScarcityExperiment:
             raise FileNotFoundError(f"No descriptive file found for {dataset_name}")
 
         # Reduction percentages
-        self.reduction_percentages = [10, 20, 50, 70, 90]
+        self.reduction_percentages = [0, 10, 20, 50, 70, 90]
 
         # Results storage
         self.results = {
@@ -157,6 +157,22 @@ class DataScarcityExperiment:
                 return f
         return None
 
+    def _find_original_target_file(self) -> Path:
+        """Find original target file."""
+        patterns = [f"{self.dataset_name}_target.txt", "muta188_target.txt"]
+        for pattern in patterns:
+            f = self.dataset_dir / pattern
+            if f.exists():
+                return f
+        raise FileNotFoundError(f"No original target file found for {self.dataset_name}")
+
+    def _find_original_folds_file(self) -> Path:
+        """Find original folds file."""
+        f = self.base_dir / "data" / "folds" / self.dataset_name / "folds1.txt"
+        if f.exists():
+            return f
+        raise FileNotFoundError(f"No original folds file found for {self.dataset_name}")
+
     def load_task_settings(self) -> Settings:
         """Load task settings from schema file."""
         try:
@@ -185,8 +201,12 @@ class DataScarcityExperiment:
         Returns:
             Tuple of (Dataset, target_file, folds_file)
         """
-        target_file = self.scarcity_dir / f"target_removed_{percentage:02d}.txt"
-        folds_file = self.scarcity_dir / "folds" / f"folds_removed_{percentage:02d}.txt"
+        if percentage == 0:
+            target_file = self._find_original_target_file()
+            folds_file = self._find_original_folds_file()
+        else:
+            target_file = self.scarcity_dir / f"target_removed_{percentage:02d}.txt"
+            folds_file = self.scarcity_dir / "folds" / f"folds_removed_{percentage:02d}.txt"
 
         if not target_file.exists():
             raise FileNotFoundError(f"Target file not found: {target_file}")
@@ -255,13 +275,28 @@ class DataScarcityExperiment:
                 print(f"Test: {len(test_data.get_target_data())} examples")
 
                 try:
+                    settings = self.load_task_settings()
+                    
+                    raw = settings.get_tree_parameters()
+                    
+                    tree_params = {
+                        #'max_number_atom_tests': tnum,
+                        'allowed_atom_tests': settings.get_atom_tests_structured(),
+                        'allowed_aggregators': settings.get_aggregates(),
+                        'minimal_examples_in_leaf': 1,
+                        'java_port': None,  # 22222,
+                        #'max_depth': depth,
+                        "per_class_bootstrap": True,
+                        "only_existential": False
+                    }
+                    
                     gb_model = GradientBoosting(
                         nb_trees_to_build=50,  # Matches paper
                         shrinkage=0.1,         # Paper grid: 0.05-0.6
                         optimize_step_size=True,
                         chosen_examples=0.8,   # Paper subsample prop
                         random_seed=fold_idx,  # Per-fold reproducibility
-                        #**self.get_tree_params(dataset)  # From settings
+                        **tree_params  # From settings
                     )
                     gb_model.build(train_data)
 
@@ -408,9 +443,9 @@ class DataScarcityExperiment:
         print(f"\n{'=' * 70}")
         print(f"DATA SCARCITY EXPERIMENT: {self.dataset_name.upper()}")
         print(f"{'=' * 70}")
-        print("Model: Bagging")
+        print("Model: GradientBoosting")
         print("Validation: 10-fold CV")
-        print("Metrics: Accuracy, Precision, Recall, F1, MSE, MAE, RMSE")
+        print("Metrics: Accuracy")
 
         for percentage in self.reduction_percentages:
             try:
@@ -433,12 +468,12 @@ class DataScarcityExperiment:
     def save_results(self) -> None:
         """Save results to files."""
 
-        summary_file = self.log_dir / "results_summary_boosting.json"
+        summary_file = self.log_dir / "results_summary_boosting_agg_all.json"
         with open(summary_file, "w") as f:
             json.dump(self.results, f, indent=2)
         print(f"\n✓ Saved summary: {summary_file}")
 
-        csv_file = self.log_dir / "results_boosting.csv"
+        csv_file = self.log_dir / "results_boosting_agg_all.csv"
         with open(csv_file, "w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(["dataset", "reduction_%", "accuracy_mean", "accuracy_std"])
@@ -456,7 +491,7 @@ class DataScarcityExperiment:
         print(f"✓ Saved CSV: {csv_file}")
 
         # Log file
-        log_file = self.log_dir / "experiment_boosting.log"
+        log_file = self.log_dir / "experiment_boosting_agg_all.log"
         with open(log_file, "w") as f:
             f.write(str(self.results))
         print(f"✓ Saved log: {log_file}")
@@ -465,7 +500,7 @@ class DataScarcityExperiment:
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
-        description="Run data scarcity experiment with Re3py Bagging on reduced datasets."
+        description="Run data reduction experiment with Re3py GradientBoosting on reduced datasets."
     )
     parser.add_argument("--dataset", required=True, help="Dataset name")
     parser.add_argument("--log-dir", type=Path, help="Output directory for results")
