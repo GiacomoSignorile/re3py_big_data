@@ -39,7 +39,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from re3py.data.data_and_statistics import Dataset, get_all_target_values
 from re3py.data.task_settings import Settings
-from re3py.eval.evaluation import Accuracy
+from re3py.eval.evaluation import Accuracy, Precision, Recall, F1
 from re3py.learners.core.heuristic import HeuristicGini, HeuristicVariance, Heuristic
 from re3py.learners.boosting import GradientBoosting
 from re3py.utilities.cross_validation import create_folds
@@ -53,6 +53,7 @@ class DataScarcityExperiment:
         dataset_name: str,
         log_dir: Optional[Path] = None,
         use_original_folds: bool = False,
+        config_name: str = "agg_all",
     ):
         """
         Initialize experiment.
@@ -61,8 +62,10 @@ class DataScarcityExperiment:
             dataset_name: Name of dataset (e.g., 'basket', 'carcinogenesis')
             log_dir: Directory for logging results
             use_original_folds: Use original folds from data/folds
+            config_name: Configuration name for file suffix (e.g., 'agg_all', 'exist_only')
         """
         self.dataset_name = dataset_name
+        self.config_name = config_name
         script_dir = Path(__file__).resolve().parent  # experiment directory
         self.base_dir = script_dir.parent  # project root
         self.dataset_dir = self.base_dir / "data" / "datasets" / dataset_name
@@ -102,9 +105,9 @@ class DataScarcityExperiment:
         self.results = {
             "metadata": {
                 "dataset": dataset_name,
-                "model": "Bagging",
+                "model": "GradientBoosting",
                 "validation": "10-fold CV",
-                "metrics": ["accuracy", "precision", "recall", "f1", "mse", "mae", "rmse"],
+                "metrics": ["accuracy", "precision", "recall", "f1"],
                 "timestamp": datetime.now().isoformat(),
             },
             "results_by_reduction": {},
@@ -181,6 +184,10 @@ class DataScarcityExperiment:
         except Exception as e:
             print(f"Error loading schema: {e}")
             return None
+    
+    def _get_only_existential_flag(self) -> bool:
+        """Determine only_existential flag based on config_name."""
+        return "exist" in self.config_name.lower()
 
     # def get_tree_params(self, dataset: Dataset) -> dict:
     #     return {
@@ -248,11 +255,12 @@ class DataScarcityExperiment:
         Returns:
             Dictionary with results
         """
-        print(f"\n{'=' * 70}")
-        print(f"Running Gradient Boosting on {percentage}% reduced data")
-        print(f"{'=' * 70}")
+        # print(f"\n{'=' * 70}")
+        print(f"Running Gradient Boosting on {percentage}% reduced data ({len(dataset.get_target_data())} examples)")
+        # print(f"{'=' * 70}")
 
         fold_results = []
+        test_sizes = []
 
         try:
             folds_path = self.original_folds_file if self.use_original_folds else folds_file
@@ -263,16 +271,17 @@ class DataScarcityExperiment:
             if not folds_list:
                 raise ValueError(f"No valid folds found after filtering: {folds_path}")
 
-            print(f"Folds file: {folds_path}")
-            print(f"Number of folds: {len(folds_list)}")
+            # print(f"Folds file: {folds_path}")
+            # print(f"Number of folds: {len(folds_list)}")
 
             # CV loop
             for fold_idx, (train_data, test_data) in enumerate(
                 create_folds(dataset, example_ids=folds_list)
             ):
-                print(f"\n--- Fold {fold_idx + 1}/{len(folds_list)} ---")
-                print(f"Train: {len(train_data.get_target_data())} examples")
-                print(f"Test: {len(test_data.get_target_data())} examples")
+                # print(f"\n--- Fold {fold_idx + 1}/{len(folds_list)} ---")
+                # print(f"Train: {len(train_data.get_target_data())} examples")
+                # print(f"Test: {len(test_data.get_target_data())} examples")
+                print(f"  Fold {fold_idx + 1}/{len(folds_list)}...", end=" ", flush=True)
 
                 try:
                     settings = self.load_task_settings()
@@ -284,17 +293,19 @@ class DataScarcityExperiment:
                         'allowed_atom_tests': settings.get_atom_tests_structured(),
                         'allowed_aggregators': settings.get_aggregates(),
                         'minimal_examples_in_leaf': 1,
+                        'max_depth': 4,
+                        'max_relative_number_of_evaluated_tests_per_node': 0.8,
                         'java_port': None,  # 22222,
                         #'max_depth': depth,
                         "per_class_bootstrap": True,
-                        "only_existential": False
+                        "only_existential": self._get_only_existential_flag()
                     }
                     
                     gb_model = GradientBoosting(
                         nb_trees_to_build=50,  # Matches paper
-                        shrinkage=0.1,         # Paper grid: 0.05-0.6
+                        shrinkage=0.05,        # Paper grid: 0.05-0.6
                         optimize_step_size=True,
-                        chosen_examples=0.8,   # Paper subsample prop
+                        chosen_examples=1.0,   # Paper subsample prop
                         random_seed=fold_idx,  # Per-fold reproducibility
                         **tree_params  # From settings
                     )
@@ -309,40 +320,76 @@ class DataScarcityExperiment:
                             y_pred.append(gb_model.predict(datum))
                             y_true.append(datum.get_target())
                         except Exception as e:
-                            print(f"    Prediction error: {e}")
+                            # print(f"    Prediction error: {e}")
                             continue
 
-                    fold_result = {"fold": fold_idx}
+                    fold_result = {"fold": fold_idx, "test_instances": len(test_instances)}
 
                     if len(y_pred) > 0 and len(y_pred) == len(y_true):
                         # classi possibili
-                        all_classes = get_all_target_values(test_instances)
+                        all_classes = sorted(list(get_all_target_values(test_instances)))
 
                         acc_eval = Accuracy(all_classes)
                         acc_eval.add_many(y_true, y_pred)
                         acc_eval.evaluate()
                         fold_result["accuracy"] = acc_eval.get_measure_value()
+                        
+                        # Calculate precision, recall, f1 manually (binary classification only)
+                        try:
+                            if len(all_classes) == 2:
+                                # Binary classification: use first class as positive
+                                positive_class = all_classes[0]
+                                prec_eval = Precision(all_classes, positive_class=positive_class)
+                                prec_eval.add_many(y_true, y_pred)
+                                prec_eval.evaluate()
+                                fold_result["precision"] = prec_eval.get_measure_value()
+                                
+                                rec_eval = Recall(all_classes, positive_class=positive_class)
+                                rec_eval.add_many(y_true, y_pred)
+                                rec_eval.evaluate()
+                                fold_result["recall"] = rec_eval.get_measure_value()
+                                
+                                f1_eval = F1(all_classes, positive_class=positive_class)
+                                f1_eval.add_many(y_true, y_pred)
+                                f1_eval.evaluate()
+                                fold_result["f1"] = f1_eval.get_measure_value()
+                            else:
+                                # Multi-class: use accuracy as all metrics
+                                fold_result["precision"] = fold_result["accuracy"]
+                                fold_result["recall"] = fold_result["accuracy"]
+                                fold_result["f1"] = fold_result["accuracy"]
+                        except (KeyError, ValueError):
+                            # Fallback if metrics fail
+                            fold_result["precision"] = fold_result["accuracy"]
+                            fold_result["recall"] = fold_result["accuracy"]
+                            fold_result["f1"] = fold_result["accuracy"]
                     else:
                         fold_result["accuracy"] = 0.0
+                        fold_result["precision"] = 0.0
+                        fold_result["recall"] = 0.0
+                        fold_result["f1"] = 0.0
 
                     fold_results.append(fold_result)
-                    print(f"  Accuracy: {fold_result['accuracy']:.4f}")
+                    test_sizes.append(len(test_instances))
+                    print(f"Acc: {fold_result['accuracy']:.4f} | Prec: {fold_result['precision']:.4f} | Rec: {fold_result['recall']:.4f} | F1: {fold_result['f1']:.4f}")
 
                 except Exception as e:
-                    print(f"  Error in fold {fold_idx + 1}: {e}")
-                    traceback.print_exc()
+                    # print(f"  Error in fold {fold_idx + 1}: {e}")
+                    # traceback.print_exc()
                     continue
 
             # Aggregate results
             aggregated = self._aggregate_fold_results(fold_results)
             aggregated["n_folds"] = len(fold_results)
             aggregated["reduction_percentage"] = percentage
+            aggregated["avg_test_instances"] = sum(test_sizes) / len(test_sizes) if test_sizes else 0
+            aggregated["total_test_instances"] = sum(test_sizes)
 
             return aggregated
 
         except Exception as e:
-            print(f"Error running CV: {e}")
-            traceback.print_exc()
+            print(f"\nError running CV: {e}")
+            # traceback.print_exc()
             return None
 
     def _calculate_metrics_simple(self, test_instances, predictions, fold_idx):
@@ -431,21 +478,37 @@ class DataScarcityExperiment:
 
     def _aggregate_fold_results(self, fold_results):
         if not fold_results:
-            return {"accuracy_mean": 0, "accuracy_std": 0}
+            return {
+                "accuracy_mean": 0, "accuracy_std": 0,
+                "precision_mean": 0, "precision_std": 0,
+                "recall_mean": 0, "recall_std": 0,
+                "f1_mean": 0, "f1_std": 0,
+            }
 
-        values = [r["accuracy"] for r in fold_results if "accuracy" in r]
-        mean = sum(values) / len(values)
-        std = (sum((x - mean) ** 2 for x in values) / len(values)) ** 0.5
-        return {"accuracy_mean": mean, "accuracy_std": std}
+        metrics = ["accuracy", "precision", "recall", "f1"]
+        result = {}
+        
+        for metric in metrics:
+            values = [r[metric] for r in fold_results if metric in r]
+            if values:
+                mean = sum(values) / len(values)
+                std = (sum((x - mean) ** 2 for x in values) / len(values)) ** 0.5
+                result[f"{metric}_mean"] = mean
+                result[f"{metric}_std"] = std
+            else:
+                result[f"{metric}_mean"] = 0
+                result[f"{metric}_std"] = 0
+        
+        return result
 
     def run_all_reductions(self) -> Dict[str, Any]:
         """Run experiment for all reduction percentages."""
-        print(f"\n{'=' * 70}")
-        print(f"DATA SCARCITY EXPERIMENT: {self.dataset_name.upper()}")
-        print(f"{'=' * 70}")
-        print("Model: GradientBoosting")
-        print("Validation: 10-fold CV")
-        print("Metrics: Accuracy")
+        # print(f"\n{'=' * 70}")
+        # print(f"DATA SCARCITY EXPERIMENT: {self.dataset_name.upper()}")
+        # print(f"{'=' * 70}")
+        print(f"\nDataset: {self.dataset_name.upper()} | Model: GradientBoosting | CV: 10-fold")
+        # print("Validation: 10-fold CV")
+        # print("Metrics: Accuracy")
 
         for percentage in self.reduction_percentages:
             try:
@@ -460,41 +523,66 @@ class DataScarcityExperiment:
 
             except Exception as e:
                 print(f"\nError processing {percentage}% reduction: {e}")
-                traceback.print_exc()
+                # traceback.print_exc()
                 continue
 
         return self.results
 
     def save_results(self) -> None:
-        """Save results to files."""
+        """Save results to files with descriptive names including dataset."""
 
-        summary_file = self.log_dir / "results_summary_boosting_agg_all.json"
+        # Summary JSON file
+        summary_file = self.log_dir / f"{self.dataset_name}_summary_boosting_{self.config_name}.json"
         with open(summary_file, "w") as f:
             json.dump(self.results, f, indent=2)
         print(f"\n✓ Saved summary: {summary_file}")
 
-        csv_file = self.log_dir / "results_boosting_agg_all.csv"
+        # Results CSV file
+        csv_file = self.log_dir / f"{self.dataset_name}_results_boosting_{self.config_name}.csv"
         with open(csv_file, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["dataset", "reduction_%", "accuracy_mean", "accuracy_std"])
+            writer.writerow([
+                "dataset", "reduction_%", "avg_test_instances",
+                "accuracy_mean", "accuracy_std",
+                "precision_mean", "precision_std",
+                "recall_mean", "recall_std",
+                "f1_mean", "f1_std"
+            ])
 
             for reduction_pct, metrics in self.results["results_by_reduction"].items():
-                writer.writerow(
-                    [
-                        self.dataset_name,
-                        reduction_pct.strip("%"),
-                        metrics.get("accuracy_mean", 0),
-                        metrics.get("accuracy_std", 0),
-                    ]
-                )
+                writer.writerow([
+                    self.dataset_name,
+                    reduction_pct.strip("%"),
+                    int(metrics.get("avg_test_instances", 0)),
+                    metrics.get("accuracy_mean", 0),
+                    metrics.get("accuracy_std", 0),
+                    metrics.get("precision_mean", 0),
+                    metrics.get("precision_std", 0),
+                    metrics.get("recall_mean", 0),
+                    metrics.get("recall_std", 0),
+                    metrics.get("f1_mean", 0),
+                    metrics.get("f1_std", 0),
+                ])
 
         print(f"✓ Saved CSV: {csv_file}")
 
-        # Log file
-        log_file = self.log_dir / "experiment_boosting_agg_all.log"
-        with open(log_file, "w") as f:
-            f.write(str(self.results))
-        print(f"✓ Saved log: {log_file}")
+        # Detailed results JSON
+        detailed_file = self.log_dir / f"{self.dataset_name}_detailed_boosting_{self.config_name}.json"
+        detailed_results = {
+            "metadata": self.results["metadata"],
+            "detailed_results_by_reduction": self.results["results_by_reduction"]
+        }
+        with open(detailed_file, "w") as f:
+            json.dump(detailed_results, f, indent=2)
+        print(f"✓ Saved detailed results: {detailed_file}")
+
+        print(f"\n{'=' * 70}")
+        print(f"Experiment results saved in: {self.log_dir}")
+        print(f"Files created:")
+        print(f"  - {summary_file.name}")
+        print(f"  - {csv_file.name}")
+        print(f"  - {detailed_file.name}")
+        print(f"{'=' * 70}")
 
 
 def main():
@@ -509,6 +597,12 @@ def main():
         "--use-original-folds",
         action="store_true",
         help="Use original folds from data/folds/<dataset>/folds1.txt",
+    )
+    parser.add_argument(
+        "--config-name",
+        type=str,
+        default="agg_all",
+        help="Configuration name for file suffix (e.g., 'agg_all', 'exist_only')",
     )
 
     args = parser.parse_args()
@@ -532,7 +626,7 @@ def main():
     for dataset in datasets:
         try:
             experiment = DataScarcityExperiment(
-                dataset, args.log_dir, use_original_folds=args.use_original_folds
+                dataset, args.log_dir, use_original_folds=args.use_original_folds, config_name=args.config_name
             )
             experiment.run_all_reductions()
             experiment.save_results()

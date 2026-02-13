@@ -1,24 +1,22 @@
 """
-Re3py Data Scarcity Experiment - Bagging AGG-All
-==================================================
+Re3py Data Scarcity Experiment - Single Tree (Decision Tree)
+==============================================================
 
-Main experiment runner for evaluating Re3py Bagging on reduced datasets.
+Main experiment runner for evaluating Re3py Single Decision Tree on reduced datasets.
 
 Configuration:
-- Model: Bagging
+- Model: Single Decision Tree (RandomForest with 1 tree)
 - Validation: 10-fold Cross-Validation
 - Metrics:
   - Classification: Accuracy, Precision, Recall, F1
-  - Regression: MSE, MAE, RMSE
-- Data Reductions: 10%, 20%, 50%, 70%, 90% (incremental)
+- Data Reductions: 0%, 10%, 20%, 50%, 70%, 90%
 
 Outputs:
 - results_summary.json: Aggregated metrics across folds
-- results_detailed.json: Per-fold results
 - results.csv: Tabular format for analysis
 
-The experiment uses the evaluation module (re3py.eval.evaluation) for
-computing all metrics through the standard Evaluator classes.
+This variant uses a single decision tree to understand baseline performance
+without ensemble effects.
 """
 
 import argparse
@@ -35,10 +33,6 @@ from typing import Any, Dict, List, Optional, Tuple
 # Add repo to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-# Compatibility patch for time.clock() in Python 3.8+
-
-# Import compatibility layer for old module paths
-
 from re3py.data.data_and_statistics import Dataset, get_all_target_values
 from re3py.data.task_settings import Settings
 from re3py.eval.evaluation import Accuracy, Precision, Recall, F1
@@ -48,7 +42,7 @@ from re3py.utilities.cross_validation import create_folds
 
 
 class DataScarcityExperiment:
-    """Runs data scarcity experiment with Re3py."""
+    """Runs data scarcity experiment with Re3py Single Tree."""
 
     def __init__(
         self,
@@ -109,7 +103,7 @@ class DataScarcityExperiment:
         self.results = {
             "metadata": {
                 "dataset": dataset_name,
-                "model": "RandomForest",
+                "model": "SingleTree",
                 "validation": "10-fold CV",
                 "metrics": ["accuracy", "precision", "recall", "f1"],
                 "timestamp": datetime.now().isoformat(),
@@ -119,7 +113,7 @@ class DataScarcityExperiment:
     
     def _setup_logger(self):
         """Setup logger to write to file and console."""
-        self.logger = logging.getLogger(f"experiment_{self.dataset_name}")
+        self.logger = logging.getLogger(f"experiment_{self.dataset_name}_st")
         self.logger.setLevel(logging.DEBUG)
         
         # Create logs directory
@@ -127,7 +121,7 @@ class DataScarcityExperiment:
         logs_dir.mkdir(parents=True, exist_ok=True)
         
         # File handler
-        log_file = logs_dir / f"bagging_{self.dataset_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        log_file = logs_dir / f"single_tree_{self.dataset_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
         file_handler = logging.FileHandler(log_file)
         file_handler.setLevel(logging.DEBUG)
         
@@ -230,7 +224,7 @@ class DataScarcityExperiment:
 
         Args:
             percentage: Percentage of data removed (10, 20, 50, 70, 90)
-the mode
+
         Returns:
             Tuple of (Dataset, target_file, folds_file)
         """
@@ -258,36 +252,28 @@ the mode
             print(f"Error creating dataset for {percentage}% reduction: {e}")
             raise
 
-    def run_bagging_cv(
+    def run_single_tree_cv(
         self,
         dataset: Dataset,
         folds_file: Path,
         percentage: int,
-        max_depth: int = 1000,
-        n_estimators: int = 50,
-        shrinkage: float = 0.1,
     ) -> Dict[str, Any]:
         """
-        Run Random Forest (Bagging) with CV on reduced dataset.
+        Run Single Decision Tree with CV on reduced dataset.
 
         Args:
             dataset: Dataset object
             folds_file: Path to folds file
             percentage: Percentage removed (for logging)
-            max_depth: Max tree depth
-            n_estimators: Number of trees
-            shrinkage: Learning rate for boosting
 
         Returns:
             Dictionary with results
         """
-        print(f"\n{'=' * 70}")
-        print(f"Running Random Forest on {percentage}% reduced data")
-        print(f"{'=' * 70}")
+        print(f"\nRunning Single Tree on {percentage}% reduced data ({len(dataset.get_target_data())} examples)")
 
         fold_results = []
         test_sizes = []
-        self.logger.info(f"Starting Random Forest on {percentage}% reduced data")
+        self.logger.info(f"Starting Single Tree on {percentage}% reduced data")
 
         try:
             folds_path = self.original_folds_file if self.use_original_folds else folds_file
@@ -313,23 +299,19 @@ the mode
                 try:
                     settings = self.load_task_settings()
                     
-                    raw = settings.get_tree_parameters()  # numNodes, minInstancesNode, maxDepth, maxTestLength
-                    # depth = 2
-                    # tnum = 6
+                    raw = settings.get_tree_parameters()
                     tree_params = {
-                        #'max_number_atom_tests': tnum,
                         'allowed_atom_tests': settings.get_atom_tests_structured(),
                         'allowed_aggregators': settings.get_aggregates(),
                         'minimal_examples_in_leaf': 1,
-                        'java_port': None,  # 22222,
-                        #'max_depth': depth,
+                        'java_port': None,
                         "per_class_bootstrap": True,
-                        "only_existential": self._get_only_existential_flag(),
-                        'max_relative_number_of_evaluated_tests_per_node': 1.0
+                        "only_existential": self._get_only_existential_flag()
                     }
 
-                    rf_model = RandomForest(
-                        nb_trees_to_build=n_estimators, 
+                    # Single tree: nb_trees_to_build=1
+                    single_tree = RandomForest(
+                        nb_trees_to_build=1,  # KEY: Single tree
                         votes_aggregator=RandomForest.proportions_aggregator,
                         random_seed=2864,
                         heuristic=HeuristicGini(),
@@ -337,12 +319,12 @@ the mode
                     )
                     
                     # Capture tree building output and log it
-                    self.logger.debug(f"Starting RandomForest build for fold {fold_idx + 1}")
+                    self.logger.debug(f"Starting SingleTree build for fold {fold_idx + 1}")
                     captured_output = io.StringIO()
                     original_stdout = sys.stdout
                     try:
                         sys.stdout = captured_output
-                        rf_model.build(train_data)
+                        single_tree.build(train_data)
                     finally:
                         sys.stdout = original_stdout
                         build_output = captured_output.getvalue()
@@ -356,7 +338,7 @@ the mode
 
                     for datum in test_instances:
                         try:
-                            y_pred.append(rf_model.predict(datum))
+                            y_pred.append(single_tree.predict(datum))
                             y_true.append(datum.get_target())
                         except Exception as e:
                             print(f"    Prediction error: {e}")
@@ -434,90 +416,6 @@ the mode
             traceback.print_exc()
             return None
 
-    def _calculate_metrics_simple(self, test_instances, predictions, fold_idx):
-        """
-        Simple metrics calculation: accuracy on predictions.
-
-        Args:
-            test_instances: List of Datum objects
-            predictions: List of (idx, pred) tuples where pred is 0 or 1
-            fold_idx: Fold index
-
-        Returns:
-            Dictionary with metrics
-        """
-        if not test_instances:
-            return {"fold": fold_idx, "accuracy": 0, "f1": 0, "auc": 0}
-
-        correct = sum(1 for idx, pred in predictions if pred == 1)
-        accuracy = correct / len(test_instances) if test_instances else 0
-
-        return {
-            "fold": fold_idx,
-            "accuracy": accuracy,
-            "f1": accuracy,  # Simplified
-            "auc": accuracy,  # Simplified
-        }
-
-    def _calculate_metrics(
-        self, predictions: List[Tuple[str, float]], test_data: Dataset, fold_idx: int
-    ) -> Dict[str, float]:
-        """
-        Calculate evaluation metrics.
-
-        Args:
-            predictions: List of (instance_id, prediction) tuples
-            test_data: Test dataset
-            fold_idx: Fold index
-
-        Returns:
-            Dictionary with metrics
-        """
-        # Get ground truth
-        test_instances = test_data.get_target_data()
-        gt_dict = {}
-        for instance in test_instances:
-            # instance.descriptive_part[0] is the instance ID
-            gt_dict[instance.descriptive_part[0]] = instance.classification_value
-
-        # Match predictions with ground truth
-        correct = 0
-        tp = fp = tn = fn = 0
-
-        for pred_id, pred_score in predictions:
-            if pred_id not in gt_dict:
-                continue
-
-            gt = gt_dict[pred_id]
-            pred_class = 1 if pred_score >= 0.5 else 0
-
-            if pred_class == gt:
-                correct += 1
-
-            # Binary classification metrics
-            if gt == 1:
-                if pred_class == 1:
-                    tp += 1
-                else:
-                    fn += 1
-            else:
-                if pred_class == 1:
-                    fp += 1
-                else:
-                    tn += 1
-
-        # Calculate metrics
-        accuracy = correct / len(gt_dict) if gt_dict else 0
-
-        precision = tp / (tp + fp) if (tp + fp) > 0 else 0
-        recall = tp / (tp + fn) if (tp + fn) > 0 else 0
-        f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
-
-        # AUC approximation
-        auc = (tp + tn) / (tp + tn + fp + fn) if (tp + tn + fp + fn) > 0 else 0
-
-        return {"fold": fold_idx, "accuracy": accuracy, "f1": f1, "auc": auc}
-
     def _aggregate_fold_results(self, fold_results):
         if not fold_results:
             return {
@@ -548,7 +446,7 @@ the mode
         print(f"\n{'=' * 70}")
         print(f"DATA SCARCITY EXPERIMENT: {self.dataset_name.upper()}")
         print(f"{'=' * 70}")
-        print("Model: Bagging")
+        print("Model: Single Decision Tree")
         print("Validation: 10-fold CV")
         print("Metrics: Accuracy, Precision, Recall, F1")
 
@@ -557,8 +455,8 @@ the mode
                 # Create dataset
                 dataset, target_file, folds_file = self.create_dataset_for_reduction(percentage)
 
-                # Run Bagging CV
-                results = self.run_bagging_cv(dataset, folds_file, percentage)
+                # Run Single Tree CV
+                results = self.run_single_tree_cv(dataset, folds_file, percentage)
 
                 if results:
                     self.results["results_by_reduction"][f"{percentage:02d}%"] = results
@@ -572,17 +470,17 @@ the mode
         return self.results
 
     def save_results(self) -> None:
-        """Save results to files with descriptive names include dataset."""
+        """Save results to files with descriptive names including dataset."""
 
         # Summary JSON file
-        summary_file = self.log_dir / f"{self.dataset_name}_summary_bagging_{self.config_name}.json"
+        summary_file = self.log_dir / f"{self.dataset_name}_summary_single_tree_{self.config_name}.json"
         with open(summary_file, "w") as f:
             json.dump(self.results, f, indent=2)
         print(f"\n✓ Saved summary: {summary_file}")
         self.logger.info(f"Saved summary: {summary_file}")
 
         # Results CSV file
-        csv_file = self.log_dir / f"{self.dataset_name}_results_bagging_{self.config_name}.csv"
+        csv_file = self.log_dir / f"{self.dataset_name}_results_single_tree_{self.config_name}.csv"
         with open(csv_file, "w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow([
@@ -612,7 +510,7 @@ the mode
         self.logger.info(f"Saved CSV: {csv_file}")
 
         # Detailed results JSON
-        detailed_file = self.log_dir / f"{self.dataset_name}_detailed_bagging_{self.config_name}.json"
+        detailed_file = self.log_dir / f"{self.dataset_name}_detailed_single_tree_{self.config_name}.json"
         detailed_results = {
             "metadata": self.results["metadata"],
             "detailed_results_by_reduction": self.results["results_by_reduction"]
@@ -635,7 +533,7 @@ the mode
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
-        description="Run data scarcity experiment with Re3py Random Forest on reduced datasets."
+        description="Run data scarcity experiment with Re3py Single Tree on reduced datasets."
     )
     parser.add_argument("--dataset", required=True, help="Dataset name")
     parser.add_argument("--log-dir", type=Path, help="Output directory for results")
@@ -681,7 +579,7 @@ def main():
             experiment.logger.info(f"Successfully completed experiment for dataset: {dataset}")
         except Exception as e:
             print(f"Error running experiment for {dataset}: {e}")
-            logging.getLogger(f"experiment_{dataset}").error(f"Error running experiment: {e}", exc_info=True)
+            logging.getLogger(f"experiment_{dataset}_st").error(f"Error running experiment: {e}", exc_info=True)
             traceback.print_exc()
             continue
 
