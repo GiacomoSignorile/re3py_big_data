@@ -70,6 +70,7 @@ class DataScarcityExperiment:
         )  # centralized data location
         self.use_original_folds = use_original_folds
         self.original_folds_file = self.base_dir / "data" / "folds" / dataset_name / "folds1.txt"
+        self._original_dataset: Optional[Dataset] = None
 
         # Ensure reduced data exists
         if not self.scarcity_dir.exists():
@@ -166,10 +167,32 @@ class DataScarcityExperiment:
         filtered_folds = []
         for fold in folds_list:
             kept = [fid for fid in fold if fid in available_ids]
-            if kept:
-                filtered_folds.append(kept)
+            filtered_folds.append(kept)
+
+        if not any(filtered_folds):
+            return []
 
         return filtered_folds
+
+    def _build_dataset(self, target_file: Path) -> Dataset:
+        """Build a Dataset object from the given target file."""
+        return Dataset(
+            s_file=str(self.schema_file),
+            data_file=str(self.descriptive_file),
+            target_file=str(target_file),
+        )
+
+    def _get_original_dataset(self) -> Dataset:
+        """Load and cache the original (full) dataset."""
+        if self._original_dataset is None:
+            target_file = self._find_original_target_file()
+            self._original_dataset = self._build_dataset(target_file)
+        return self._original_dataset
+
+    def _get_full_classes(self) -> List[str]:
+        """Return all target classes from the original dataset."""
+        original_dataset = self._get_original_dataset()
+        return sorted(list(get_all_target_values(original_dataset.get_target_data())))
 
     def _find_schema_file(self) -> Path:
         """Find schema (.s) file."""
@@ -284,6 +307,8 @@ class DataScarcityExperiment:
             if not folds_list:
                 raise ValueError(f"No valid folds found after filtering: {folds_path}")
 
+            full_classes = self._get_full_classes()
+
             print(f"Folds file: {folds_path}")
             print(f"Number of folds: {len(folds_list)}")
 
@@ -291,10 +316,12 @@ class DataScarcityExperiment:
             for fold_idx, (train_data, test_data) in enumerate(
                 create_folds(dataset, example_ids=folds_list)
             ):
+                test_instances = test_data.get_target_data()
+
                 print(f"\n--- Fold {fold_idx + 1}/{len(folds_list)} ---")
                 print(f"Train: {len(train_data.get_target_data())} examples")
-                print(f"Test: {len(test_data.get_target_data())} examples")
-                self.logger.info(f"Fold {fold_idx + 1}/{len(folds_list)} - Train: {len(train_data.get_target_data())}, Test: {len(test_data.get_target_data())}")
+                print(f"Test: {len(test_instances)} examples")
+                self.logger.info(f"Fold {fold_idx + 1}/{len(folds_list)} - Train: {len(train_data.get_target_data())}, Test: {len(test_instances)}")
 
                 try:
                     settings = self.load_task_settings()
@@ -333,7 +360,6 @@ class DataScarcityExperiment:
                         captured_output.close()
 
                     # Make predictions on test data
-                    test_instances = test_data.get_target_data()
                     y_true, y_pred = [], []
 
                     for datum in test_instances:
@@ -348,29 +374,27 @@ class DataScarcityExperiment:
 
                     if len(y_pred) > 0 and len(y_pred) == len(y_true):
                         # classi possibili
-                        all_classes = sorted(list(get_all_target_values(test_instances)))
-
-                        acc_eval = Accuracy(all_classes)
+                        acc_eval = Accuracy(full_classes)
                         acc_eval.add_many(y_true, y_pred)
                         acc_eval.evaluate()
                         fold_result["accuracy"] = acc_eval.get_measure_value()
                         
                         # Calculate precision, recall, f1 manually (binary classification only)
                         try:
-                            if len(all_classes) == 2:
+                            if len(full_classes) == 2:
                                 # Binary classification: use first class as positive
-                                positive_class = all_classes[0]
-                                prec_eval = Precision(all_classes, positive_class=positive_class)
+                                positive_class = full_classes[0]
+                                prec_eval = Precision(full_classes, positive_class=positive_class)
                                 prec_eval.add_many(y_true, y_pred)
                                 prec_eval.evaluate()
                                 fold_result["precision"] = prec_eval.get_measure_value()
                                 
-                                rec_eval = Recall(all_classes, positive_class=positive_class)
+                                rec_eval = Recall(full_classes, positive_class=positive_class)
                                 rec_eval.add_many(y_true, y_pred)
                                 rec_eval.evaluate()
                                 fold_result["recall"] = rec_eval.get_measure_value()
                                 
-                                f1_eval = F1(all_classes, positive_class=positive_class)
+                                f1_eval = F1(full_classes, positive_class=positive_class)
                                 f1_eval.add_many(y_true, y_pred)
                                 f1_eval.evaluate()
                                 fold_result["f1"] = f1_eval.get_measure_value()
@@ -379,7 +403,7 @@ class DataScarcityExperiment:
                                 fold_result["precision"] = fold_result["accuracy"]
                                 fold_result["recall"] = fold_result["accuracy"]
                                 fold_result["f1"] = fold_result["accuracy"]
-                        except (KeyError, ValueError):
+                        except (KeyError, ValueError, ZeroDivisionError):
                             # Fallback if metrics fail
                             fold_result["precision"] = fold_result["accuracy"]
                             fold_result["recall"] = fold_result["accuracy"]
@@ -399,6 +423,16 @@ class DataScarcityExperiment:
                     print(f"  Error in fold {fold_idx + 1}: {e}")
                     self.logger.error(f"Error in fold {fold_idx + 1}: {e}", exc_info=True)
                     traceback.print_exc()
+                    fold_result = {
+                        "fold": fold_idx,
+                        "test_instances": len(test_instances),
+                        "accuracy": 0.0,
+                        "precision": 0.0,
+                        "recall": 0.0,
+                        "f1": 0.0,
+                    }
+                    fold_results.append(fold_result)
+                    test_sizes.append(len(test_instances))
                     continue
 
             # Aggregate results

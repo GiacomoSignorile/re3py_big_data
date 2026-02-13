@@ -168,8 +168,10 @@ class DataScarcityExperiment:
         filtered_folds = []
         for fold in folds_list:
             kept = [fid for fid in fold if fid in available_ids]
-            if kept:
-                filtered_folds.append(kept)
+            filtered_folds.append(kept)
+
+        if not any(filtered_folds):
+            return []
 
         return filtered_folds
 
@@ -421,7 +423,7 @@ class DataScarcityExperiment:
                                 fold_result["precision"] = fold_result["accuracy"]
                                 fold_result["recall"] = fold_result["accuracy"]
                                 fold_result["f1"] = fold_result["accuracy"]
-                        except (KeyError, ValueError):
+                        except (KeyError, ValueError, ZeroDivisionError):
                             fold_result["precision"] = fold_result["accuracy"]
                             fold_result["recall"] = fold_result["accuracy"]
                             fold_result["f1"] = fold_result["accuracy"]
