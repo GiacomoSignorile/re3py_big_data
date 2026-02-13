@@ -23,7 +23,9 @@ computing all metrics through the standard Evaluator classes.
 
 import argparse
 import csv
+import io
 import json
+import logging
 import sys
 import traceback
 from datetime import datetime
@@ -88,6 +90,9 @@ class DataScarcityExperiment:
         self.log_dir = log_dir
         self.log_dir.mkdir(parents=True, exist_ok=True)
 
+        # Setup logging
+        self._setup_logger()
+
         # Find schema file (.s)
         self.schema_file = self._find_schema_file()
         if not self.schema_file:
@@ -141,6 +146,32 @@ class DataScarcityExperiment:
                 filtered_folds.append(kept)
 
         return filtered_folds
+
+    def _setup_logger(self):
+        """Setup logger to write to file and console."""
+        self.logger = logging.getLogger(f"experiment_{self.dataset_name}_gb")
+        self.logger.setLevel(logging.DEBUG)
+
+        logs_dir = self.base_dir / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+
+        log_file = logs_dir / f"boosting_{self.dataset_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setLevel(logging.DEBUG)
+
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setLevel(logging.INFO)
+
+        formatter = logging.Formatter(
+            "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+        file_handler.setFormatter(formatter)
+        console_handler.setFormatter(formatter)
+
+        if not self.logger.handlers:
+            self.logger.addHandler(file_handler)
+            self.logger.addHandler(console_handler)
 
     def _find_schema_file(self) -> Path:
         """Find schema (.s) file."""
@@ -309,7 +340,23 @@ class DataScarcityExperiment:
                         random_seed=fold_idx,  # Per-fold reproducibility
                         **tree_params  # From settings
                     )
-                    gb_model.build(train_data)
+                    # Capture tree building output and log it
+                    self.logger.debug("Starting GradientBoosting build for fold %s", fold_idx + 1)
+                    captured_output = io.StringIO()
+                    original_stdout = sys.stdout
+                    try:
+                        sys.stdout = captured_output
+                        gb_model.build(train_data)
+                    finally:
+                        sys.stdout = original_stdout
+                        build_output = captured_output.getvalue()
+                        if build_output:
+                            self.logger.debug(
+                                "Tree building output for fold %s:\n%s",
+                                fold_idx + 1,
+                                build_output,
+                            )
+                        captured_output.close()
 
                     # Make predictions on test data
                     test_instances = test_data.get_target_data()

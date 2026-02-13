@@ -337,7 +337,7 @@ the mode
                     )
                     
                     # Capture tree building output and log it
-                    self.logger.debug(f"Starting RandomForest build for fold {fold_idx + 1}")
+                    self.logger.debug(f"Starting Bagging build for fold {fold_idx + 1}")
                     captured_output = io.StringIO()
                     original_stdout = sys.stdout
                     try:
