@@ -1,0 +1,666 @@
+"""
+Re3py Data Scarcity Experiment - Boosting Full Test
+===================================================
+
+Main experiment runner for evaluating Re3py GradientBoosting on reduced datasets,
+while testing on the full (original) test folds.
+
+Configuration:
+- Model: GradientBoosting
+- Validation: 10-fold Cross-Validation
+- Metrics:
+  - Classification: Accuracy, Precision, Recall, F1
+- Data Reductions: 10%, 20%, 50%, 70%, 90% (incremental)
+
+Outputs:
+- results_summary.json: Aggregated metrics across folds
+- results_detailed.json: Per-fold results
+- results.csv: Tabular format for analysis
+
+The experiment uses the evaluation module (re3py.eval.evaluation) for
+computing all metrics through the standard Evaluator classes.
+"""
+
+import argparse
+import csv
+import json
+import sys
+import traceback
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+# Add repo to path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from re3py.data.data_and_statistics import Dataset, get_all_target_values
+from re3py.data.task_settings import Settings
+from re3py.eval.evaluation import Accuracy, Precision, Recall, F1
+from re3py.learners.boosting import GradientBoosting
+from re3py.utilities.cross_validation import create_folds
+
+
+class DataScarcityExperiment:
+    """Runs data scarcity experiment with Re3py."""
+
+    def __init__(
+        self,
+        dataset_name: str,
+        log_dir: Optional[Path] = None,
+        use_original_folds: bool = False,
+        config_name: str = "agg_all",
+    ):
+        """
+        Initialize experiment.
+
+        Args:
+            dataset_name: Name of dataset (e.g., 'basket', 'carcinogenesis')
+            log_dir: Directory for logging results
+            use_original_folds: Use original folds from data/folds
+            config_name: Configuration name for file suffix (e.g., 'agg_all', 'exist_only')
+        """
+        self.dataset_name = dataset_name
+        self.config_name = config_name
+        script_dir = Path(__file__).resolve().parent  # experiment directory
+        self.base_dir = script_dir.parent  # project root
+        self.dataset_dir = self.base_dir / "data" / "datasets" / dataset_name
+        self.nb_trees = 50
+        self.scarcity_dir = (
+            self.base_dir / "data" / "data_reduced" / dataset_name
+        )  # centralized data location
+        self.use_original_folds = use_original_folds
+        self.original_folds_file = self.base_dir / "data" / "folds" / dataset_name / "folds1.txt"
+        self._original_dataset: Optional[Dataset] = None
+
+        # Ensure reduced data exists
+        if not self.scarcity_dir.exists():
+            raise FileNotFoundError(
+                f"Reduced data not found. Run preprocessing first: {self.scarcity_dir}"
+            )
+
+        # Results directory
+        if log_dir is None:
+            log_dir = self.base_dir / "experiment" / "results" / dataset_name
+        self.log_dir = log_dir
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+
+        # Find schema file (.s)
+        self.schema_file = self._find_schema_file()
+        if not self.schema_file:
+            raise FileNotFoundError(f"No schema file found for {dataset_name}")
+
+        # Find original descriptive file (will use for all reductions)
+        self.descriptive_file = self._find_descriptive_file()
+        if not self.descriptive_file:
+            raise FileNotFoundError(f"No descriptive file found for {dataset_name}")
+
+        # Reduction percentages
+        self.reduction_percentages = [0, 10, 20, 50, 70, 90]
+
+        # Results storage
+        self.results = {
+            "metadata": {
+                "dataset": dataset_name,
+                "model": "GradientBoosting",
+                "validation": "10-fold CV (full test)",
+                "metrics": ["accuracy", "precision", "recall", "f1"],
+                "timestamp": datetime.now().isoformat(),
+            },
+            "results_by_reduction": {},
+        }
+
+    def _load_folds_list(self, folds_file: Path, dataset: Dataset) -> List[List[str]]:
+        """Load folds from file and filter to IDs present in the dataset."""
+        with open(folds_file) as f:
+            fold_content = f.read()
+
+        # Parse fold IDs
+        folds_list = []
+        current_fold = []
+        for line in fold_content.strip().split("\n"):
+            line = line.strip()
+            if line.startswith("|||"):
+                if current_fold:
+                    folds_list.append(current_fold)
+                    current_fold = []
+            elif line and not line.startswith("|"):
+                current_fold.append(line)
+        if current_fold:
+            folds_list.append(current_fold)
+
+        # Filter fold IDs to those present in the current dataset
+        available_ids = {d.descriptive_part[0] for d in dataset.get_target_data()}
+        filtered_folds = []
+        for fold in folds_list:
+            kept = [fid for fid in fold if fid in available_ids]
+            if kept:
+                filtered_folds.append(kept)
+
+        return filtered_folds
+
+    def _find_schema_file(self) -> Path:
+        """Find schema (.s) file."""
+        patterns = [f"{self.dataset_name}.s", "muta188.s"]
+        for pattern in patterns:
+            f = self.dataset_dir / pattern
+            if f.exists():
+                return f
+        return None
+
+    def _find_descriptive_file(self) -> Path:
+        """Find descriptive file."""
+        patterns = [f"{self.dataset_name}_descriptive.txt", "muta188_descriptive.txt"]
+        for pattern in patterns:
+            f = self.dataset_dir / pattern
+            if f.exists():
+                return f
+        return None
+
+    def _find_original_target_file(self) -> Path:
+        """Find original target file."""
+        patterns = [f"{self.dataset_name}_target.txt", "muta188_target.txt"]
+        for pattern in patterns:
+            f = self.dataset_dir / pattern
+            if f.exists():
+                return f
+        raise FileNotFoundError(f"No original target file found for {self.dataset_name}")
+
+    def _find_original_folds_file(self) -> Path:
+        """Find original folds file."""
+        f = self.base_dir / "data" / "folds" / self.dataset_name / "folds1.txt"
+        if f.exists():
+            return f
+        raise FileNotFoundError(f"No original folds file found for {self.dataset_name}")
+
+    def load_task_settings(self) -> Settings:
+        """Load task settings from schema file."""
+        try:
+            settings = Settings(str(self.schema_file))
+            return settings
+        except Exception as e:
+            print(f"Error loading schema: {e}")
+            return None
+
+    def _get_only_existential_flag(self) -> bool:
+        """Determine only_existential flag based on config_name."""
+        return "exist" in self.config_name.lower()
+
+    def _build_dataset(self, target_file: Path) -> Dataset:
+        """Build a Dataset object from the given target file."""
+        return Dataset(
+            s_file=str(self.schema_file),
+            data_file=str(self.descriptive_file),
+            target_file=str(target_file),
+        )
+
+    def _get_original_dataset(self) -> Dataset:
+        """Load and cache the original (full) dataset."""
+        if self._original_dataset is None:
+            target_file = self._find_original_target_file()
+            self._original_dataset = self._build_dataset(target_file)
+        return self._original_dataset
+
+    def create_datasets_for_reduction(self, percentage: int) -> Tuple[Dataset, Dataset, Path]:
+        """
+        Create reduced and original Dataset objects for given reduction percentage.
+
+        Args:
+            percentage: Percentage of data removed (10, 20, 50, 70, 90)
+
+        Returns:
+            Tuple of (reduced_dataset, original_dataset, folds_file)
+        """
+        if percentage == 0:
+            target_file = self._find_original_target_file()
+        else:
+            target_file = self.scarcity_dir / f"target_removed_{percentage:02d}.txt"
+        folds_file = self._find_original_folds_file()
+
+        if not target_file.exists():
+            raise FileNotFoundError(f"Target file not found: {target_file}")
+        if not folds_file.exists():
+            raise FileNotFoundError(f"Folds file not found: {folds_file}")
+
+        try:
+            reduced_dataset = self._build_dataset(target_file)
+            original_dataset = self._get_original_dataset()
+            return reduced_dataset, original_dataset, folds_file
+        except Exception as e:
+            print(f"Error creating dataset for {percentage}% reduction: {e}")
+            raise
+
+    def _filter_training_data(self, full_train_data: Dataset, allowed_ids: set) -> Dataset:
+        """Filter training data to the reduced dataset IDs."""
+        filtered_targets = [
+            d for d in full_train_data.get_target_data() if d.descriptive_part[0] in allowed_ids
+        ]
+        return Dataset(
+            settings=full_train_data.settings,
+            data_file=full_train_data.data_file,
+            descriptive_relations=full_train_data.get_descriptive_data(),
+            target_data=filtered_targets,
+            statistics=full_train_data.get_copy_statistics(),
+        )
+
+    def run_gradient_boosting_cv(
+        self,
+        reduced_dataset: Dataset,
+        original_dataset: Dataset,
+        folds_file: Path,
+        percentage: int,
+        max_depth: int = 5,
+        n_estimators: int = 50,
+        shrinkage: float = 0.1,
+    ) -> Dict[str, Any]:
+        """
+        Run Gradient Boosting with CV using reduced training and full test set.
+
+        Args:
+            reduced_dataset: Dataset object with reduced instances (train filter)
+            original_dataset: Dataset object with full instances (test set)
+            folds_file: Path to folds file
+            percentage: Percentage removed (for logging)
+            max_depth: Max tree depth
+            n_estimators: Number of boosting iterations
+            shrinkage: Learning rate for boosting
+
+        Returns:
+            Dictionary with results
+        """
+        print(
+            "Running Gradient Boosting on %s%% reduced data (full test)"
+            % percentage
+        )
+
+        fold_results = []
+        test_sizes = []
+
+        try:
+            folds_path = self.original_folds_file if self.use_original_folds else folds_file
+            if self.use_original_folds and not folds_path.exists():
+                raise FileNotFoundError(f"Original folds file not found: {folds_path}")
+
+            folds_list = self._load_folds_list(folds_path, original_dataset)
+            if not folds_list:
+                raise ValueError(f"No valid folds found after filtering: {folds_path}")
+
+            full_classes = sorted(list(get_all_target_values(original_dataset.get_target_data())))
+
+            reduced_ids = {d.descriptive_part[0] for d in reduced_dataset.get_target_data()}
+
+            # CV loop on full dataset, filter training to reduced IDs
+            for fold_idx, (full_train_data, test_data) in enumerate(
+                create_folds(original_dataset, example_ids=folds_list)
+            ):
+                train_data = self._filter_training_data(full_train_data, reduced_ids)
+                test_instances = test_data.get_target_data()
+                print(f"  Fold {fold_idx + 1}/{len(folds_list)}...", end=" ", flush=True)
+
+                try:
+                    settings = self.load_task_settings()
+
+                    _ = settings.get_tree_parameters()
+
+                    tree_params = {
+                        "allowed_atom_tests": settings.get_atom_tests_structured(),
+                        "allowed_aggregators": settings.get_aggregates(),
+                        "minimal_examples_in_leaf": 1,
+                        "max_depth": 4,
+                        "max_relative_number_of_evaluated_tests_per_node": 0.8,
+                        "java_port": None,
+                        "per_class_bootstrap": True,
+                        "only_existential": self._get_only_existential_flag(),
+                    }
+
+                    gb_model = GradientBoosting(
+                        nb_trees_to_build=50,
+                        shrinkage=0.05,
+                        optimize_step_size=True,
+                        chosen_examples=1.0,
+                        random_seed=fold_idx,
+                        **tree_params,
+                    )
+                    gb_model.build(train_data)
+
+                    # Make predictions on full test data
+                    y_true, y_pred = [], []
+
+                    for datum in test_instances:
+                        try:
+                            y_pred.append(gb_model.predict(datum))
+                            y_true.append(datum.get_target())
+                        except Exception:
+                            continue
+
+                    fold_result = {"fold": fold_idx, "test_instances": len(test_instances)}
+
+                    if len(y_pred) > 0 and len(y_pred) == len(y_true):
+                        acc_eval = Accuracy(full_classes)
+                        acc_eval.add_many(y_true, y_pred)
+                        acc_eval.evaluate()
+                        fold_result["accuracy"] = acc_eval.get_measure_value()
+
+                        # Calculate precision, recall, f1 manually (binary classification only)
+                        try:
+                            if len(full_classes) == 2:
+                                positive_class = full_classes[0]
+                                prec_eval = Precision(full_classes, positive_class=positive_class)
+                                prec_eval.add_many(y_true, y_pred)
+                                prec_eval.evaluate()
+                                fold_result["precision"] = prec_eval.get_measure_value()
+
+                                rec_eval = Recall(full_classes, positive_class=positive_class)
+                                rec_eval.add_many(y_true, y_pred)
+                                rec_eval.evaluate()
+                                fold_result["recall"] = rec_eval.get_measure_value()
+
+                                f1_eval = F1(full_classes, positive_class=positive_class)
+                                f1_eval.add_many(y_true, y_pred)
+                                f1_eval.evaluate()
+                                fold_result["f1"] = f1_eval.get_measure_value()
+                            else:
+                                fold_result["precision"] = fold_result["accuracy"]
+                                fold_result["recall"] = fold_result["accuracy"]
+                                fold_result["f1"] = fold_result["accuracy"]
+                        except (KeyError, ValueError):
+                            fold_result["precision"] = fold_result["accuracy"]
+                            fold_result["recall"] = fold_result["accuracy"]
+                            fold_result["f1"] = fold_result["accuracy"]
+                    else:
+                        fold_result["accuracy"] = 0.0
+                        fold_result["precision"] = 0.0
+                        fold_result["recall"] = 0.0
+                        fold_result["f1"] = 0.0
+
+                    fold_results.append(fold_result)
+                    test_sizes.append(len(test_instances))
+                    print(
+                        "Acc: %.4f | Prec: %.4f | Rec: %.4f | F1: %.4f"
+                        % (
+                            fold_result["accuracy"],
+                            fold_result["precision"],
+                            fold_result["recall"],
+                            fold_result["f1"],
+                        )
+                    )
+
+                except Exception:
+                    fold_result = {
+                        "fold": fold_idx,
+                        "test_instances": len(test_instances),
+                        "accuracy": 0.0,
+                        "precision": 0.0,
+                        "recall": 0.0,
+                        "f1": 0.0,
+                    }
+                    fold_results.append(fold_result)
+                    test_sizes.append(len(test_instances))
+                    continue
+
+            # Aggregate results
+            aggregated = self._aggregate_fold_results(fold_results)
+            aggregated["n_folds"] = len(fold_results)
+            aggregated["reduction_percentage"] = percentage
+            aggregated["avg_test_instances"] = sum(test_sizes) / len(test_sizes) if test_sizes else 0
+            aggregated["total_test_instances"] = sum(test_sizes)
+
+            return aggregated
+
+        except Exception as e:
+            print(f"\nError running CV: {e}")
+            return None
+
+    def _calculate_metrics_simple(self, test_instances, predictions, fold_idx):
+        """
+        Simple metrics calculation: accuracy on predictions.
+
+        Args:
+            test_instances: List of Datum objects
+            predictions: List of (idx, pred) tuples where pred is 0 or 1
+            fold_idx: Fold index
+
+        Returns:
+            Dictionary with metrics
+        """
+        if not test_instances:
+            return {"fold": fold_idx, "accuracy": 0, "f1": 0, "auc": 0}
+
+        correct = sum(1 for idx, pred in predictions if pred == 1)
+        accuracy = correct / len(test_instances) if test_instances else 0
+
+        return {
+            "fold": fold_idx,
+            "accuracy": accuracy,
+            "f1": accuracy,
+            "auc": accuracy,
+        }
+
+    def _calculate_metrics(
+        self, predictions: List[Tuple[str, float]], test_data: Dataset, fold_idx: int
+    ) -> Dict[str, float]:
+        """
+        Calculate evaluation metrics.
+
+        Args:
+            predictions: List of (instance_id, prediction) tuples
+            test_data: Test dataset
+            fold_idx: Fold index
+
+        Returns:
+            Dictionary with metrics
+        """
+        test_instances = test_data.get_target_data()
+        gt_dict = {}
+        for instance in test_instances:
+            gt_dict[instance.descriptive_part[0]] = instance.classification_value
+
+        correct = 0
+        tp = fp = tn = fn = 0
+
+        for pred_id, pred_score in predictions:
+            if pred_id not in gt_dict:
+                continue
+
+            gt = gt_dict[pred_id]
+            pred_class = 1 if pred_score >= 0.5 else 0
+
+            if pred_class == gt:
+                correct += 1
+
+            if gt == 1:
+                if pred_class == 1:
+                    tp += 1
+                else:
+                    fn += 1
+            else:
+                if pred_class == 1:
+                    fp += 1
+                else:
+                    tn += 1
+
+        accuracy = correct / len(gt_dict) if gt_dict else 0
+
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+        f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+
+        auc = (tp + tn) / (tp + tn + fp + fn) if (tp + tn + fp + fn) > 0 else 0
+
+        return {"fold": fold_idx, "accuracy": accuracy, "f1": f1, "auc": auc}
+
+    def _aggregate_fold_results(self, fold_results):
+        if not fold_results:
+            return {
+                "accuracy_mean": 0,
+                "accuracy_std": 0,
+                "precision_mean": 0,
+                "precision_std": 0,
+                "recall_mean": 0,
+                "recall_std": 0,
+                "f1_mean": 0,
+                "f1_std": 0,
+            }
+
+        metrics = ["accuracy", "precision", "recall", "f1"]
+        result = {}
+
+        for metric in metrics:
+            values = [r[metric] for r in fold_results if metric in r]
+            if values:
+                mean = sum(values) / len(values)
+                std = (sum((x - mean) ** 2 for x in values) / len(values)) ** 0.5
+                result[f"{metric}_mean"] = mean
+                result[f"{metric}_std"] = std
+            else:
+                result[f"{metric}_mean"] = 0
+                result[f"{metric}_std"] = 0
+
+        return result
+
+    def run_all_reductions(self) -> Dict[str, Any]:
+        """Run experiment for all reduction percentages."""
+        print(
+            "\nDataset: %s | Model: GradientBoosting | CV: 10-fold (full test)"
+            % self.dataset_name.upper()
+        )
+
+        for percentage in self.reduction_percentages:
+            try:
+                reduced_dataset, original_dataset, folds_file = self.create_datasets_for_reduction(percentage)
+
+                results = self.run_gradient_boosting_cv(
+                    reduced_dataset,
+                    original_dataset,
+                    folds_file,
+                    percentage,
+                )
+
+                if results:
+                    self.results["results_by_reduction"][f"{percentage:02d}%"] = results
+
+            except Exception as e:
+                print(f"\nError processing {percentage}% reduction: {e}")
+                continue
+
+        return self.results
+
+    def save_results(self) -> None:
+        """Save results to files with descriptive names including dataset."""
+
+        summary_file = self.log_dir / f"{self.dataset_name}_summary_boosting_{self.config_name}_full_test.json"
+        with open(summary_file, "w") as f:
+            json.dump(self.results, f, indent=2)
+        print(f"\n✓ Saved summary: {summary_file}")
+
+        csv_file = self.log_dir / f"{self.dataset_name}_results_boosting_{self.config_name}_full_test.csv"
+        with open(csv_file, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(
+                [
+                    "dataset",
+                    "reduction_%",
+                    "avg_test_instances",
+                    "accuracy_mean",
+                    "accuracy_std",
+                    "precision_mean",
+                    "precision_std",
+                    "recall_mean",
+                    "recall_std",
+                    "f1_mean",
+                    "f1_std",
+                ]
+            )
+
+            for reduction_pct, metrics in self.results["results_by_reduction"].items():
+                writer.writerow(
+                    [
+                        self.dataset_name,
+                        reduction_pct.strip("%"),
+                        int(metrics.get("avg_test_instances", 0)),
+                        metrics.get("accuracy_mean", 0),
+                        metrics.get("accuracy_std", 0),
+                        metrics.get("precision_mean", 0),
+                        metrics.get("precision_std", 0),
+                        metrics.get("recall_mean", 0),
+                        metrics.get("recall_std", 0),
+                        metrics.get("f1_mean", 0),
+                        metrics.get("f1_std", 0),
+                    ]
+                )
+
+        print(f"✓ Saved CSV: {csv_file}")
+
+        detailed_file = self.log_dir / f"{self.dataset_name}_detailed_boosting_{self.config_name}_full_test.json"
+        detailed_results = {
+            "metadata": self.results["metadata"],
+            "detailed_results_by_reduction": self.results["results_by_reduction"],
+        }
+        with open(detailed_file, "w") as f:
+            json.dump(detailed_results, f, indent=2)
+        print(f"✓ Saved detailed results: {detailed_file}")
+
+        print("\n" + "=" * 70)
+        print(f"Experiment results saved in: {self.log_dir}")
+        print("Files created:")
+        print(f"  - {summary_file.name}")
+        print(f"  - {csv_file.name}")
+        print(f"  - {detailed_file.name}")
+        print("=" * 70)
+
+
+def main():
+    """Main entry point."""
+    parser = argparse.ArgumentParser(
+        description="Run data scarcity experiment with Re3py GradientBoosting on reduced datasets (full test)."
+    )
+    parser.add_argument("--dataset", required=True, help="Dataset name")
+    parser.add_argument("--log-dir", type=Path, help="Output directory for results")
+    parser.add_argument("--all", action="store_true", help="Run all datasets")
+    parser.add_argument(
+        "--use-original-folds",
+        action="store_true",
+        help="Use original folds from data/folds/<dataset>/folds1.txt",
+    )
+    parser.add_argument(
+        "--config-name",
+        type=str,
+        default="agg_all",
+        help="Configuration name for file suffix (e.g., 'agg_all', 'exist_only')",
+    )
+
+    args = parser.parse_args()
+
+    datasets = []
+    if args.all:
+        datasets = [
+            "basket",
+            "carcinogenesis",
+            "imdb_big",
+            "movie",
+            "mutagenesis",
+            "stack_big",
+            "uwcse",
+            "webkb",
+            "yelp_big",
+        ]
+    else:
+        datasets = [args.dataset]
+
+    for dataset in datasets:
+        try:
+            experiment = DataScarcityExperiment(
+                dataset,
+                args.log_dir,
+                use_original_folds=args.use_original_folds,
+                config_name=args.config_name,
+            )
+            experiment.run_all_reductions()
+            experiment.save_results()
+        except Exception as e:
+            print(f"Error running experiment for {dataset}: {e}")
+            traceback.print_exc()
+            continue
+
+
+if __name__ == "__main__":
+    main()
