@@ -52,6 +52,7 @@ class DataScarcityExperiment:
         log_dir: Optional[Path] = None,
         use_original_folds: bool = False,
         config_name: str = "agg_all",
+        n_jobs: int = 4,
     ):
         """
         Initialize experiment.
@@ -61,9 +62,11 @@ class DataScarcityExperiment:
             log_dir: Directory for logging results
             use_original_folds: Use original folds from data/folds
             config_name: Configuration name for file suffix (e.g., 'agg_all', 'exist_only')
+            n_jobs: Number of parallel workers for fold processing (default: 2 for large datasets)
         """
         self.dataset_name = dataset_name
         self.config_name = config_name
+        self.n_jobs = n_jobs
         script_dir = Path(__file__).resolve().parent  # experiment directory
         self.base_dir = script_dir.parent  # project root
         self.dataset_dir = self.base_dir / "data" / "datasets" / dataset_name
@@ -447,8 +450,9 @@ class DataScarcityExperiment:
             )
 
             # Run folds in parallel using joblib
-            # Using n_jobs=-1 uses all available CPU cores
-            fold_results_with_sizes = Parallel(n_jobs=-1, verbose=10)(
+            # Using a limited number of workers to avoid memory issues with large datasets
+            self.logger.info(f"Running {len(all_folds)} folds in parallel with {self.n_jobs} workers")
+            fold_results_with_sizes = Parallel(n_jobs=self.n_jobs, verbose=10)(
                 delayed(self._run_single_fold)(
                     fold_idx=fold_idx,
                     train_data=self._filter_training_data(full_train_data, reduced_ids),
@@ -747,6 +751,12 @@ def main():
         default="agg_all",
         help="Configuration name for file suffix (e.g., 'agg_all', 'exist_only')",
     )
+    parser.add_argument(
+        "--n-jobs",
+        type=int,
+        default=2,
+        help="Number of parallel workers for fold processing (default: 2, -1 for all cores)",
+    )
 
     args = parser.parse_args()
 
@@ -773,6 +783,7 @@ def main():
                 args.log_dir,
                 use_original_folds=args.use_original_folds,
                 config_name=args.config_name,
+                n_jobs=args.n_jobs,
             )
             experiment.run_all_reductions()
             experiment.save_results()
