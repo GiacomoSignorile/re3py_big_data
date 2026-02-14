@@ -31,6 +31,7 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from joblib import Parallel, delayed
 
 # Add repo to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -343,6 +344,7 @@ class DataScarcityExperiment:
                         "java_port": None,
                         "per_class_bootstrap": True,
                         "only_existential": self._get_only_existential_flag(),
+                        "longest_atom_test_chain": 2,  # Optimized as per paper (Section 5.3, page 11)
                     }
 
                     gb_model = GradientBoosting(

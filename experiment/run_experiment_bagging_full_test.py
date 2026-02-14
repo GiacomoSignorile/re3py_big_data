@@ -32,6 +32,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from joblib import Parallel, delayed
+
 # Add repo to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -280,6 +282,147 @@ class DataScarcityExperiment:
             statistics=full_train_data.get_copy_statistics(),
         )
 
+    def _run_single_fold(
+        self,
+        fold_idx: int,
+        train_data: Dataset,
+        test_data: Dataset,
+        full_classes: List[str],
+        n_folds: int,
+        n_estimators: int = 50,
+    ) -> Tuple[Dict[str, Any], int]:
+        """
+        Process a single fold for cross-validation.
+
+        Args:
+            fold_idx: Fold index
+            train_data: Training dataset (already filtered to reduced IDs)
+            test_data: Test dataset
+            full_classes: List of all target classes
+            n_folds: Total number of folds (for logging)
+            n_estimators: Number of trees in random forest
+
+        Returns:
+            Tuple of (fold_result_dict, test_set_size)
+        """
+        test_instances = test_data.get_target_data()
+        fold_result = {"fold": fold_idx, "test_instances": len(test_instances)}
+
+        try:
+            settings = self.load_task_settings()
+            _ = settings.get_tree_parameters()
+            
+            tree_params = {
+                "allowed_atom_tests": settings.get_atom_tests_structured(),
+                "allowed_aggregators": settings.get_aggregates(),
+                "minimal_examples_in_leaf": 1,
+                "java_port": None,
+                "per_class_bootstrap": True,
+                "only_existential": self._get_only_existential_flag(),
+                "max_relative_number_of_evaluated_tests_per_node": 1.0,
+                "longest_atom_test_chain": 2,  # Optimized as per paper (Section 5.3, page 11)
+            }
+
+            rf_model = RandomForest(
+                nb_trees_to_build=n_estimators,
+                votes_aggregator=RandomForest.proportions_aggregator,
+                random_seed=2864,
+                heuristic=HeuristicGini(),
+                **tree_params,
+            )
+
+            # Capture tree building output and log it
+            self.logger.debug("Starting RandomForest build for fold %s", fold_idx + 1)
+            captured_output = io.StringIO()
+            original_stdout = sys.stdout
+            try:
+                sys.stdout = captured_output
+                rf_model.build(train_data)
+            finally:
+                sys.stdout = original_stdout
+                build_output = captured_output.getvalue()
+                if build_output:
+                    self.logger.debug(
+                        "Tree building output for fold %s:\n%s",
+                        fold_idx + 1,
+                        build_output,
+                    )
+                captured_output.close()
+
+            # Make predictions on full test data
+            y_true, y_pred = [], []
+
+            for datum in test_instances:
+                try:
+                    y_pred.append(rf_model.predict(datum))
+                    y_true.append(datum.get_target())
+                except Exception as e:
+                    self.logger.debug(f"Prediction error in fold {fold_idx + 1}: {e}")
+                    continue
+
+            if len(y_pred) > 0 and len(y_pred) == len(y_true):
+                acc_eval = Accuracy(full_classes)
+                acc_eval.add_many(y_true, y_pred)
+                acc_eval.evaluate()
+                fold_result["accuracy"] = acc_eval.get_measure_value()
+
+                # Calculate precision, recall, f1 for binary classification
+                try:
+                    if len(full_classes) == 2:
+                        positive_class = full_classes[0]
+                        prec_eval = Precision(full_classes, positive_class=positive_class)
+                        prec_eval.add_many(y_true, y_pred)
+                        prec_eval.evaluate()
+                        fold_result["precision"] = prec_eval.get_measure_value()
+
+                        rec_eval = Recall(full_classes, positive_class=positive_class)
+                        rec_eval.add_many(y_true, y_pred)
+                        rec_eval.evaluate()
+                        fold_result["recall"] = rec_eval.get_measure_value()
+
+                        f1_eval = F1(full_classes, positive_class=positive_class)
+                        f1_eval.add_many(y_true, y_pred)
+                        f1_eval.evaluate()
+                        fold_result["f1"] = f1_eval.get_measure_value()
+                    else:
+                        fold_result["precision"] = fold_result["accuracy"]
+                        fold_result["recall"] = fold_result["accuracy"]
+                        fold_result["f1"] = fold_result["accuracy"]
+                except (KeyError, ValueError, ZeroDivisionError):
+                    fold_result["precision"] = fold_result["accuracy"]
+                    fold_result["recall"] = fold_result["accuracy"]
+                    fold_result["f1"] = fold_result["accuracy"]
+            else:
+                fold_result["accuracy"] = 0.0
+                fold_result["precision"] = 0.0
+                fold_result["recall"] = 0.0
+                fold_result["f1"] = 0.0
+
+            self.logger.info(
+                "Fold %s/%s completed - Accuracy: %.4f, Precision: %.4f, Recall: %.4f, F1: %.4f",
+                fold_idx + 1,
+                n_folds,
+                fold_result["accuracy"],
+                fold_result["precision"],
+                fold_result["recall"],
+                fold_result["f1"],
+            )
+
+            return fold_result, len(test_instances)
+
+        except Exception as e:
+            self.logger.error(f"Error in fold {fold_idx + 1}: {e}", exc_info=True)
+            fold_result = {
+                "fold": fold_idx,
+                "test_instances": len(test_instances),
+                "accuracy": 0.0,
+                "precision": 0.0,
+                "recall": 0.0,
+                "f1": 0.0,
+            }
+            return fold_result, len(test_instances)
+
+
     def run_bagging_cv(
         self,
         reduced_dataset: Dataset,
@@ -329,146 +472,36 @@ class DataScarcityExperiment:
 
             reduced_ids = {d.descriptive_part[0] for d in reduced_dataset.get_target_data()}
 
-            # CV loop on full dataset, filter training to reduced IDs
-            for fold_idx, (full_train_data, test_data) in enumerate(
-                create_folds(original_dataset, example_ids=folds_list)
-            ):
-                train_data = self._filter_training_data(full_train_data, reduced_ids)
+            # Collect all folds first for parallel processing
+            all_folds = list(
+                enumerate(create_folds(original_dataset, example_ids=folds_list))
+            )
 
-                test_instances = test_data.get_target_data()
-
-                print(f"\n--- Fold {fold_idx + 1}/{len(folds_list)} ---")
-                print(f"Train (reduced): {len(train_data.get_target_data())} examples")
-                print(f"Test (full): {len(test_instances)} examples")
-                self.logger.info(
-                    "Fold %s/%s - Train (reduced): %s, Test (full): %s",
-                    fold_idx + 1,
-                    len(folds_list),
-                    len(train_data.get_target_data()),
-                    len(test_instances),
+            # Run folds in parallel using joblib
+            # Using n_jobs=-1 uses all available CPU cores
+            fold_results_with_sizes = Parallel(n_jobs=-1, verbose=10)(
+                delayed(self._run_single_fold)(
+                    fold_idx=fold_idx,
+                    train_data=self._filter_training_data(full_train_data, reduced_ids),
+                    test_data=test_data,
+                    full_classes=full_classes,
+                    n_folds=len(all_folds),
+                    n_estimators=n_estimators,
                 )
+                for fold_idx, (full_train_data, test_data) in all_folds
+            )
 
-                try:
-                    settings = self.load_task_settings()
-
-                    _ = settings.get_tree_parameters()
-                    tree_params = {
-                        "allowed_atom_tests": settings.get_atom_tests_structured(),
-                        "allowed_aggregators": settings.get_aggregates(),
-                        "minimal_examples_in_leaf": 1,
-                        "java_port": None,
-                        "per_class_bootstrap": True,
-                        "only_existential": self._get_only_existential_flag(),
-                        "max_relative_number_of_evaluated_tests_per_node": 1.0,
-                    }
-
-                    rf_model = RandomForest(
-                        nb_trees_to_build=n_estimators,
-                        votes_aggregator=RandomForest.proportions_aggregator,
-                        random_seed=2864,
-                        heuristic=HeuristicGini(),
-                        **tree_params,
-                    )
-
-                    # Capture tree building output and log it
-                    self.logger.debug("Starting RandomForest build for fold %s", fold_idx + 1)
-                    captured_output = io.StringIO()
-                    original_stdout = sys.stdout
-                    try:
-                        sys.stdout = captured_output
-                        rf_model.build(train_data)
-                    finally:
-                        sys.stdout = original_stdout
-                        build_output = captured_output.getvalue()
-                        if build_output:
-                            self.logger.debug(
-                                "Tree building output for fold %s:\n%s",
-                                fold_idx + 1,
-                                build_output,
-                            )
-                        captured_output.close()
-
-                    # Make predictions on full test data
-                    y_true, y_pred = [], []
-
-                    for datum in test_instances:
-                        try:
-                            y_pred.append(rf_model.predict(datum))
-                            y_true.append(datum.get_target())
-                        except Exception as e:
-                            print(f"    Prediction error: {e}")
-                            continue
-
-                    fold_result = {"fold": fold_idx, "test_instances": len(test_instances)}
-
-                    if len(y_pred) > 0 and len(y_pred) == len(y_true):
-                        acc_eval = Accuracy(full_classes)
-                        acc_eval.add_many(y_true, y_pred)
-                        acc_eval.evaluate()
-                        fold_result["accuracy"] = acc_eval.get_measure_value()
-
-                        # Calculate precision, recall, f1 manually (binary classification only)
-                        try:
-                            if len(full_classes) == 2:
-                                positive_class = full_classes[0]
-                                prec_eval = Precision(full_classes, positive_class=positive_class)
-                                prec_eval.add_many(y_true, y_pred)
-                                prec_eval.evaluate()
-                                fold_result["precision"] = prec_eval.get_measure_value()
-
-                                rec_eval = Recall(full_classes, positive_class=positive_class)
-                                rec_eval.add_many(y_true, y_pred)
-                                rec_eval.evaluate()
-                                fold_result["recall"] = rec_eval.get_measure_value()
-
-                                f1_eval = F1(full_classes, positive_class=positive_class)
-                                f1_eval.add_many(y_true, y_pred)
-                                f1_eval.evaluate()
-                                fold_result["f1"] = f1_eval.get_measure_value()
-                            else:
-                                fold_result["precision"] = fold_result["accuracy"]
-                                fold_result["recall"] = fold_result["accuracy"]
-                                fold_result["f1"] = fold_result["accuracy"]
-                        except (KeyError, ValueError, ZeroDivisionError):
-                            fold_result["precision"] = fold_result["accuracy"]
-                            fold_result["recall"] = fold_result["accuracy"]
-                            fold_result["f1"] = fold_result["accuracy"]
-                    else:
-                        fold_result["accuracy"] = 0.0
-                        fold_result["precision"] = 0.0
-                        fold_result["recall"] = 0.0
-                        fold_result["f1"] = 0.0
-
-                    fold_results.append(fold_result)
-                    test_sizes.append(len(test_instances))
-                    print(
-                        f"  Accuracy: {fold_result['accuracy']:.4f} | Precision: {fold_result['precision']:.4f} | "
-                        f"Recall: {fold_result['recall']:.4f} | F1: {fold_result['f1']:.4f}"
-                    )
-                    self.logger.info(
-                        "Fold %s completed - Accuracy: %.4f, Precision: %.4f, Recall: %.4f, F1: %.4f",
-                        fold_idx + 1,
-                        fold_result["accuracy"],
-                        fold_result["precision"],
-                        fold_result["recall"],
-                        fold_result["f1"],
-                    )
-
-                except Exception as e:
-                    print(f"  Error in fold {fold_idx + 1}: {e}")
-                    self.logger.error(f"Error in fold {fold_idx + 1}: {e}", exc_info=True)
-                    traceback.print_exc()
-                    fold_result = {
-                        "fold": fold_idx,
-                        "test_instances": len(test_instances),
-                        "accuracy": 0.0,
-                        "precision": 0.0,
-                        "recall": 0.0,
-                        "f1": 0.0,
-                    }
-                    fold_results.append(fold_result)
-                    test_sizes.append(len(test_instances))
-                    continue
+            # Unpack results
+            fold_results = []
+            test_sizes = []
+            for fold_result, test_size in fold_results_with_sizes:
+                fold_results.append(fold_result)
+                test_sizes.append(test_size)
+                print(
+                    f"  Fold {fold_result['fold'] + 1} - Accuracy: {fold_result['accuracy']:.4f} | "
+                    f"Precision: {fold_result['precision']:.4f} | Recall: {fold_result['recall']:.4f} | "
+                    f"F1: {fold_result['f1']:.4f}"
+                )
 
             # Aggregate results
             aggregated = self._aggregate_fold_results(fold_results)
