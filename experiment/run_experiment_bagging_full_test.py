@@ -592,46 +592,51 @@ class DataScarcityExperiment:
 
         return result
 
-    def run_all_reductions(self) -> Dict[str, Any]:
-        """Run experiment for all reduction percentages."""
-        print(f"\n{'=' * 70}")
-        print(f"DATA SCARCITY EXPERIMENT: {self.dataset_name.upper()}")
-        print(f"{'=' * 70}")
-        print("Model: Bagging (full test)")
-        print("Validation: 10-fold CV")
-        print("Metrics: Accuracy, Precision, Recall, F1")
-
-        for percentage in self.reduction_percentages:
+    def _load_checkpoint(self) -> bool:
+        """
+        Load existing results from checkpoint files if available.
+        
+        Returns:
+            True if checkpoint was loaded, False otherwise
+        """
+        csv_file = self.log_dir / f"{self.dataset_name}_results_bagging_{self.config_name}_full_test.csv"
+        summary_file = self.log_dir / f"{self.dataset_name}_summary_bagging_{self.config_name}_full_test.json"
+        
+        if summary_file.exists():
             try:
-                reduced_dataset, original_dataset, folds_file = self.create_datasets_for_reduction(percentage)
-
-                results = self.run_bagging_cv(
-                    reduced_dataset,
-                    original_dataset,
-                    folds_file,
-                    percentage,
-                )
-
-                if results:
-                    self.results["results_by_reduction"][f"{percentage:02d}%"] = results
-
+                with open(summary_file, "r") as f:
+                    saved_results = json.load(f)
+                self.results = saved_results
+                print(f"\n✓ Loaded checkpoint from: {summary_file}")
+                self.logger.info(f"Loaded checkpoint from: {summary_file}")
+                print(f"  Resuming from {len(self.results.get('results_by_reduction', {}))} completed reductions")
+                return True
             except Exception as e:
-                print(f"\nError processing {percentage}% reduction: {e}")
-                self.logger.error(f"Error processing {percentage}% reduction: {e}", exc_info=True)
-                traceback.print_exc()
-                continue
+                print(f"Warning: Could not load checkpoint: {e}")
+                self.logger.warning(f"Could not load checkpoint: {e}")
+                return False
+        return False
 
-        return self.results
+    def _reduction_already_completed(self, percentage: int) -> bool:
+        """
+        Check if a reduction percentage has already been completed.
+        
+        Args:
+            percentage: Reduction percentage
+            
+        Returns:
+            True if results exist for this reduction, False otherwise
+        """
+        reduction_key = f"{percentage:02d}%"
+        return reduction_key in self.results.get("results_by_reduction", {})
 
-    def save_results(self) -> None:
-        """Save results to files with descriptive names include dataset."""
-
+    def _save_checkpoint(self) -> None:
+        """Save intermediate results after each reduction."""
         summary_file = self.log_dir / f"{self.dataset_name}_summary_bagging_{self.config_name}_full_test.json"
         with open(summary_file, "w") as f:
             json.dump(self.results, f, indent=2)
-        print(f"\n✓ Saved summary: {summary_file}")
-        self.logger.info(f"Saved summary: {summary_file}")
-
+        
+        # Also update CSV with current results
         csv_file = self.log_dir / f"{self.dataset_name}_results_bagging_{self.config_name}_full_test.csv"
         with open(csv_file, "w", newline="") as f:
             writer = csv.writer(f)
@@ -668,8 +673,63 @@ class DataScarcityExperiment:
                     ]
                 )
 
-        print(f"✓ Saved CSV: {csv_file}")
-        self.logger.info(f"Saved CSV: {csv_file}")
+    def run_all_reductions(self) -> Dict[str, Any]:
+        """Run experiment for all reduction percentages."""
+        print(f"\n{'=' * 70}")
+        print(f"DATA SCARCITY EXPERIMENT: {self.dataset_name.upper()}")
+        print(f"{'=' * 70}")
+        print("Model: Bagging (full test)")
+        print("Validation: 10-fold CV")
+        print("Metrics: Accuracy, Precision, Recall, F1")
+
+        # Try to load checkpoint
+        checkpoint_loaded = self._load_checkpoint()
+        if checkpoint_loaded:
+            print(f"Resuming experiment from checkpoint...")
+        else:
+            print(f"Starting new experiment...")
+
+        for percentage in self.reduction_percentages:
+            # Skip if already completed
+            if self._reduction_already_completed(percentage):
+                reduction_key = f"{percentage:02d}%"
+                print(f"\n⊘ Skipping {percentage}% reduction (already completed)")
+                self.logger.info(f"Skipping {percentage}% reduction (already completed)")
+                continue
+
+            try:
+                reduced_dataset, original_dataset, folds_file = self.create_datasets_for_reduction(percentage)
+
+                results = self.run_bagging_cv(
+                    reduced_dataset,
+                    original_dataset,
+                    folds_file,
+                    percentage,
+                )
+
+                if results:
+                    self.results["results_by_reduction"][f"{percentage:02d}%"] = results
+                    # Save checkpoint immediately after this reduction completes
+                    self._save_checkpoint()
+                    print(f"✓ Checkpoint saved after {percentage}% reduction")
+                    self.logger.info(f"Checkpoint saved after {percentage}% reduction")
+
+            except Exception as e:
+                print(f"\nError processing {percentage}% reduction: {e}")
+                self.logger.error(f"Error processing {percentage}% reduction: {e}", exc_info=True)
+                traceback.print_exc()
+                continue
+
+        return self.results
+
+    def save_results(self) -> None:
+        """Save final results and detailed breakdown."""
+
+        summary_file = self.log_dir / f"{self.dataset_name}_summary_bagging_{self.config_name}_full_test.json"
+        with open(summary_file, "w") as f:
+            json.dump(self.results, f, indent=2)
+        print(f"\n✓ Saved summary: {summary_file}")
+        self.logger.info(f"Saved summary: {summary_file}")
 
         detailed_file = self.log_dir / f"{self.dataset_name}_detailed_bagging_{self.config_name}_full_test.json"
         detailed_results = {
@@ -682,10 +742,9 @@ class DataScarcityExperiment:
         self.logger.info(f"Saved detailed results: {detailed_file}")
 
         print(f"\n{'=' * 70}")
-        print(f"Experiment results saved in: {self.log_dir}")
+        print(f"Experiment completed and results saved in: {self.log_dir}")
         print("Files created:")
         print(f"  - {summary_file.name}")
-        print(f"  - {csv_file.name}")
         print(f"  - {detailed_file.name}")
         print(f"{'=' * 70}")
         self.logger.info("Experiment completed successfully")
