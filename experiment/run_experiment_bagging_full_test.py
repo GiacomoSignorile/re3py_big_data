@@ -100,7 +100,7 @@ class DataScarcityExperiment:
             raise FileNotFoundError(f"No descriptive file found for {dataset_name}")
 
         # Reduction percentages
-        self.reduction_percentages = [0, 10, 20, 50, 70, 90]
+        self.reduction_percentages = [10, 20, 50, 70, 90]
 
         # Results storage
         self.results = {
