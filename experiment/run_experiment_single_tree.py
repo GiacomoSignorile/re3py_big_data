@@ -5,7 +5,7 @@ Re3py Data Scarcity Experiment - Single Tree (Decision Tree)
 Main experiment runner for evaluating Re3py Single Decision Tree on reduced datasets.
 
 Configuration:
-- Model: Single Decision Tree (RandomForest with 1 tree)
+- Model: Single Decision Tree (DecisionTree)
 - Validation: 10-fold Cross-Validation
 - Metrics:
   - Classification: Accuracy, Precision, Recall, F1
@@ -24,6 +24,7 @@ import csv
 import io
 import json
 import logging
+import random
 import sys
 import traceback
 from datetime import datetime
@@ -38,7 +39,7 @@ from re3py.data.data_and_statistics import Dataset, get_all_target_values
 from re3py.data.task_settings import Settings
 from re3py.eval.evaluation import Accuracy, Precision, Recall, F1
 from re3py.learners.core.heuristic import HeuristicGini
-from re3py.learners.random_forest import RandomForest
+from re3py.learners.tree import DecisionTree
 from re3py.utilities.cross_validation import create_folds
 
 
@@ -51,6 +52,7 @@ class DataScarcityExperiment:
         log_dir: Optional[Path] = None,
         use_original_folds: bool = False,
         config_name: str = "agg_all",
+        n_jobs: int = 2,
     ):
         """
         Initialize experiment.
@@ -60,9 +62,11 @@ class DataScarcityExperiment:
             log_dir: Directory for logging results
             use_original_folds: Use original folds from data/folds
             config_name: Configuration name for file suffix (e.g., 'agg_all', 'exist_only')
+            n_jobs: Number of parallel workers for fold processing (default: 2 for large datasets)
         """
         self.dataset_name = dataset_name
         self.config_name = config_name
+        self.n_jobs = n_jobs
         script_dir = Path(__file__).resolve().parent  # experiment directory
         self.base_dir = script_dir.parent  # project root
         self.dataset_dir = self.base_dir / "data" / "datasets" / dataset_name
@@ -100,6 +104,11 @@ class DataScarcityExperiment:
 
         # Reduction percentages
         self.reduction_percentages = [10, 20, 50, 70, 90]
+
+        # Grid search parameters (Section 5.3, page 11)
+        self.leaf_size_values = [1, 5, 10, 15, 20]
+        self.impurity_values = [0.0, 0.01, 0.02, 0.05, 0.1, 0.2]
+        self.inner_cv_folds = 3  # Inner 3-fold CV for hyperparameter tuning
 
         # Results storage
         self.results = {
@@ -276,6 +285,281 @@ class DataScarcityExperiment:
             print(f"Error creating dataset for {percentage}% reduction: {e}")
             raise
 
+    def _tune_tree_parameters(
+        self,
+        train_data: Dataset,
+        settings: Settings,
+        fold_idx: int,
+    ) -> Tuple[int, float, float]:
+        """
+        Tune tree parameters using inner 3-fold CV (Section 5.3, page 11).
+
+        For each combination of (leaf_size, impurity), trains a tree and evaluates
+        on validation fold. Returns the parameters with best average accuracy.
+
+        Args:
+            train_data: Training dataset for this fold
+            settings: Task settings
+            fold_idx: Outer fold index (for logging)
+
+        Returns:
+            Tuple of (best_leaf_size, best_impurity, best_inner_cv_score)
+        """
+        print(f"    Tuning parameters with inner 3-fold CV...")
+        self.logger.debug(f"Fold {fold_idx + 1}: Starting inner 3-fold CV for parameter tuning")
+
+        best_score = -1.0
+        best_leaf_size = 1
+        best_impurity = 0.0
+        results_log = []
+
+        try:
+            inner_folds_list = self._load_or_create_inner_folds(train_data)
+
+            # Grid search over all parameter combinations
+            for leaf_size in self.leaf_size_values:
+                for impurity in self.impurity_values:
+                    fold_scores = []
+
+                    # Inner CV
+                    for inner_fold_idx, (inner_train, inner_val) in enumerate(
+                        create_folds(train_data, example_ids=inner_folds_list)
+                    ):
+                        try:
+                            tree_params = {
+                                'allowed_atom_tests': settings.get_atom_tests_structured(),
+                                'allowed_aggregators': settings.get_aggregates(),
+                                'minimal_examples_in_leaf': leaf_size,
+                                'minimal_impurity': impurity,
+                                'java_port': None,
+                                "per_class_bootstrap": True,
+                                "only_existential": self._get_only_existential_flag(),
+                                "longest_atom_test_chain": 2,
+                                "heuristic": HeuristicGini(),
+                            }
+
+                            inner_tree = DecisionTree(
+                                random_seed=2864 + inner_fold_idx,
+                                **tree_params
+                            )
+
+                            # Build tree
+                            captured_output = io.StringIO()
+                            original_stdout = sys.stdout
+                            try:
+                                sys.stdout = captured_output
+                                inner_tree.build(inner_train)
+                            finally:
+                                sys.stdout = original_stdout
+                                captured_output.close()
+
+                            # Evaluate on validation fold
+                            val_classes = sorted(list(get_all_target_values(inner_val.get_target_data())))
+                            y_true, y_pred = [], []
+
+                            for datum in inner_val.get_target_data():
+                                try:
+                                    y_pred.append(inner_tree.predict(datum))
+                                    y_true.append(datum.get_target())
+                                except:
+                                    pass
+
+                            if len(y_pred) > 0 and len(y_pred) == len(y_true):
+                                acc_eval = Accuracy(val_classes)
+                                acc_eval.add_many(y_true, y_pred)
+                                acc_eval.evaluate()
+                                fold_scores.append(acc_eval.get_measure_value())
+
+                        except Exception as e:
+                            self.logger.debug(
+                                f"Inner fold {inner_fold_idx + 1} failed for leaf_size={leaf_size}, impurity={impurity}: {e}"
+                            )
+                            fold_scores.append(0.0)
+
+                    # Average score for this parameter combination
+                    if fold_scores:
+                        avg_score = sum(fold_scores) / len(fold_scores)
+                        results_log.append(
+                            {
+                                "leaf_size": leaf_size,
+                                "impurity": impurity,
+                                "avg_score": avg_score,
+                            }
+                        )
+
+                        if avg_score > best_score:
+                            best_score = avg_score
+                            best_leaf_size = leaf_size
+                            best_impurity = impurity
+
+        except Exception as e:
+            self.logger.error(
+                f"Error during parameter tuning for fold {fold_idx + 1}: {e}",
+                exc_info=True,
+            )
+            print(f"    Warning: Parameter tuning failed, using defaults (leaf_size=1, impurity=0)")
+
+        self.logger.debug(
+            f"Fold {fold_idx + 1}: Inner CV results - {results_log}. Best: leaf_size={best_leaf_size}, impurity={best_impurity}, score={best_score:.4f}"
+        )
+
+        return best_leaf_size, best_impurity, best_score
+
+    def _load_or_create_inner_folds(self, data: Dataset) -> List[List[str]]:
+        """
+        Create 3-fold CV splits for inner parameter tuning.
+
+        Args:
+            data: Dataset to split
+
+        Returns:
+            List of 3 folds, each containing example IDs
+        """
+        target_data = data.get_target_data()
+        example_ids = [d.descriptive_part[0] for d in target_data]
+
+        # Shuffle and split into 3 folds
+        random.shuffle(example_ids)
+        fold_size = len(example_ids) // self.inner_cv_folds
+        inner_folds = []
+
+        for i in range(self.inner_cv_folds):
+            start_idx = i * fold_size
+            end_idx = (i + 1) * fold_size if i < self.inner_cv_folds - 1 else len(example_ids)
+            inner_folds.append(example_ids[start_idx:end_idx])
+
+        return inner_folds
+
+    def _run_single_fold(
+        self,
+        fold_idx: int,
+        train_data: Dataset,
+        test_data: Dataset,
+        full_classes: List[str],
+        n_folds: int,
+    ) -> Tuple[Dict[str, Any], int]:
+        """
+        Run a single fold of single tree training.
+
+        Args:
+            fold_idx: Fold index
+            train_data: Training dataset
+            test_data: Test dataset
+            full_classes: List of all possible classes
+            n_folds: Total number of folds
+
+        Returns:
+            Tuple of (fold_result dict, test_size)
+        """
+        test_instances = test_data.get_target_data()
+
+        try:
+            settings = self.load_task_settings()
+            
+            # Tune hyperparameters using inner 3-fold CV (Section 5.3, page 11)
+            best_leaf_size, best_impurity, inner_cv_score = self._tune_tree_parameters(
+                train_data, settings, fold_idx
+            )
+            
+            # Build final tree with best parameters
+            tree_params = {
+                'allowed_atom_tests': settings.get_atom_tests_structured(),
+                'allowed_aggregators': settings.get_aggregates(),
+                'minimal_examples_in_leaf': best_leaf_size,
+                'minimal_impurity': best_impurity,
+                'java_port': None,
+                "per_class_bootstrap": True,
+                "only_existential": self._get_only_existential_flag(),
+                "longest_atom_test_chain": 2,  # Look-ahead depth = 2 (Section 5.3, page 11)
+                "heuristic": HeuristicGini()  # GINI index as split criterion (Section 4.2, page 7)
+            }
+
+            # Single Decision Tree with tuned parameters
+            single_tree = DecisionTree(
+                random_seed=2864,
+                **tree_params
+            )
+            
+            # Capture tree building output and log it
+            self.logger.debug(f"Starting SingleTree build for fold {fold_idx + 1}/{n_folds}")
+            captured_output = io.StringIO()
+            original_stdout = sys.stdout
+            try:
+                sys.stdout = captured_output
+                single_tree.build(train_data)
+            finally:
+                sys.stdout = original_stdout
+                build_output = captured_output.getvalue()
+                if build_output:
+                    self.logger.debug(f"Tree building output for fold {fold_idx + 1}:\n{build_output}")
+                captured_output.close()
+
+            # Make predictions on test data
+            y_true, y_pred = [], []
+
+            for datum in test_instances:
+                try:
+                    y_pred.append(single_tree.predict(datum))
+                    y_true.append(datum.get_target())
+                except Exception as e:
+                    self.logger.debug(f"Prediction error in fold {fold_idx + 1}: {e}")
+                    continue
+
+            fold_result = {"fold": fold_idx, "test_instances": len(test_instances)}
+
+            if len(y_pred) > 0 and len(y_pred) == len(y_true):
+                acc_eval = Accuracy(full_classes)
+                acc_eval.add_many(y_true, y_pred)
+                acc_eval.evaluate()
+                fold_result["accuracy"] = acc_eval.get_measure_value()
+                
+                # Calculate precision, recall, f1
+                try:
+                    if len(full_classes) == 2:
+                        positive_class = full_classes[0]
+                        prec_eval = Precision(full_classes, positive_class=positive_class)
+                        prec_eval.add_many(y_true, y_pred)
+                        prec_eval.evaluate()
+                        fold_result["precision"] = prec_eval.get_measure_value()
+                        
+                        rec_eval = Recall(full_classes, positive_class=positive_class)
+                        rec_eval.add_many(y_true, y_pred)
+                        rec_eval.evaluate()
+                        fold_result["recall"] = rec_eval.get_measure_value()
+                        
+                        f1_eval = F1(full_classes, positive_class=positive_class)
+                        f1_eval.add_many(y_true, y_pred)
+                        f1_eval.evaluate()
+                        fold_result["f1"] = f1_eval.get_measure_value()
+                    else:
+                        fold_result["precision"] = fold_result["accuracy"]
+                        fold_result["recall"] = fold_result["accuracy"]
+                        fold_result["f1"] = fold_result["accuracy"]
+                except (KeyError, ValueError, ZeroDivisionError):
+                    fold_result["precision"] = fold_result["accuracy"]
+                    fold_result["recall"] = fold_result["accuracy"]
+                    fold_result["f1"] = fold_result["accuracy"]
+            else:
+                fold_result["accuracy"] = 0.0
+                fold_result["precision"] = 0.0
+                fold_result["recall"] = 0.0
+                fold_result["f1"] = 0.0
+
+            self.logger.info(f"Fold {fold_idx + 1}/{n_folds} completed - Accuracy: {fold_result['accuracy']:.4f}, Precision: {fold_result['precision']:.4f}, Recall: {fold_result['recall']:.4f}, F1: {fold_result['f1']:.4f}")
+            return fold_result, len(test_instances)
+
+        except Exception as e:
+            self.logger.error(f"Error in fold {fold_idx + 1}: {e}", exc_info=True)
+            fold_result = {
+                "fold": fold_idx,
+                "test_instances": len(test_instances),
+                "accuracy": 0.0,
+                "precision": 0.0,
+                "recall": 0.0,
+                "f1": 0.0,
+            }
+            return fold_result, len(test_instances)
+
     def run_single_tree_cv(
         self,
         dataset: Dataset,
@@ -313,129 +597,35 @@ class DataScarcityExperiment:
             print(f"Folds file: {folds_path}")
             print(f"Number of folds: {len(folds_list)}")
 
-            # CV loop
-            for fold_idx, (train_data, test_data) in enumerate(
-                create_folds(dataset, example_ids=folds_list)
-            ):
-                test_instances = test_data.get_target_data()
+            # Collect all folds first for parallel processing
+            all_folds = list(
+                enumerate(create_folds(dataset, example_ids=folds_list))
+            )
 
-                print(f"\n--- Fold {fold_idx + 1}/{len(folds_list)} ---")
-                print(f"Train: {len(train_data.get_target_data())} examples")
-                print(f"Test: {len(test_instances)} examples")
-                self.logger.info(f"Fold {fold_idx + 1}/{len(folds_list)} - Train: {len(train_data.get_target_data())}, Test: {len(test_instances)}")
+            # Run folds in parallel using joblib
+            self.logger.info(f"Running {len(all_folds)} folds in parallel with {self.n_jobs} workers")
+            fold_results_with_sizes = Parallel(n_jobs=self.n_jobs, verbose=10)(
+                delayed(self._run_single_fold)(
+                    fold_idx=fold_idx,
+                    train_data=train_data,
+                    test_data=test_data,
+                    full_classes=full_classes,
+                    n_folds=len(all_folds),
+                )
+                for fold_idx, (train_data, test_data) in all_folds
+            )
 
-                try:
-                    settings = self.load_task_settings()
-                    
-                    raw = settings.get_tree_parameters()
-                    tree_params = {
-                        'allowed_atom_tests': settings.get_atom_tests_structured(),
-                        'allowed_aggregators': settings.get_aggregates(),
-                        'minimal_examples_in_leaf': 1,
-                        'java_port': None,
-                        "per_class_bootstrap": True,
-                        "only_existential": self._get_only_existential_flag(),
-                        "longest_atom_test_chain": 2  # Optimized as per paper (Section 5.3, page 11)
-                    }
-
-                    # Single tree: nb_trees_to_build=1
-                    single_tree = RandomForest(
-                        nb_trees_to_build=1,  # KEY: Single tree
-                        votes_aggregator=RandomForest.proportions_aggregator,
-                        random_seed=2864,
-                        heuristic=HeuristicGini(),
-                        **tree_params
-                    )
-                    
-                    # Capture tree building output and log it
-                    self.logger.debug(f"Starting SingleTree build for fold {fold_idx + 1}")
-                    captured_output = io.StringIO()
-                    original_stdout = sys.stdout
-                    try:
-                        sys.stdout = captured_output
-                        single_tree.build(train_data)
-                    finally:
-                        sys.stdout = original_stdout
-                        build_output = captured_output.getvalue()
-                        if build_output:
-                            self.logger.debug(f"Tree building output for fold {fold_idx + 1}:\n{build_output}")
-                        captured_output.close()
-
-                    # Make predictions on test data
-                    y_true, y_pred = [], []
-
-                    for datum in test_instances:
-                        try:
-                            y_pred.append(single_tree.predict(datum))
-                            y_true.append(datum.get_target())
-                        except Exception as e:
-                            print(f"    Prediction error: {e}")
-                            continue
-
-                    fold_result = {"fold": fold_idx, "test_instances": len(test_instances)}
-
-                    if len(y_pred) > 0 and len(y_pred) == len(y_true):
-                        # classi possibili
-                        acc_eval = Accuracy(full_classes)
-                        acc_eval.add_many(y_true, y_pred)
-                        acc_eval.evaluate()
-                        fold_result["accuracy"] = acc_eval.get_measure_value()
-                        
-                        # Calculate precision, recall, f1 manually (binary classification only)
-                        try:
-                            if len(full_classes) == 2:
-                                # Binary classification: use first class as positive
-                                positive_class = full_classes[0]
-                                prec_eval = Precision(full_classes, positive_class=positive_class)
-                                prec_eval.add_many(y_true, y_pred)
-                                prec_eval.evaluate()
-                                fold_result["precision"] = prec_eval.get_measure_value()
-                                
-                                rec_eval = Recall(full_classes, positive_class=positive_class)
-                                rec_eval.add_many(y_true, y_pred)
-                                rec_eval.evaluate()
-                                fold_result["recall"] = rec_eval.get_measure_value()
-                                
-                                f1_eval = F1(full_classes, positive_class=positive_class)
-                                f1_eval.add_many(y_true, y_pred)
-                                f1_eval.evaluate()
-                                fold_result["f1"] = f1_eval.get_measure_value()
-                            else:
-                                # Multi-class: use accuracy as all metrics
-                                fold_result["precision"] = fold_result["accuracy"]
-                                fold_result["recall"] = fold_result["accuracy"]
-                                fold_result["f1"] = fold_result["accuracy"]
-                        except (KeyError, ValueError, ZeroDivisionError):
-                            # Fallback if metrics fail
-                            fold_result["precision"] = fold_result["accuracy"]
-                            fold_result["recall"] = fold_result["accuracy"]
-                            fold_result["f1"] = fold_result["accuracy"]
-                    else:
-                        fold_result["accuracy"] = 0.0
-                        fold_result["precision"] = 0.0
-                        fold_result["recall"] = 0.0
-                        fold_result["f1"] = 0.0
-
-                    fold_results.append(fold_result)
-                    test_sizes.append(len(test_instances))
-                    print(f"  Accuracy: {fold_result['accuracy']:.4f} | Precision: {fold_result['precision']:.4f} | Recall: {fold_result['recall']:.4f} | F1: {fold_result['f1']:.4f}")
-                    self.logger.info(f"Fold {fold_idx + 1} completed - Accuracy: {fold_result['accuracy']:.4f}, Precision: {fold_result['precision']:.4f}, Recall: {fold_result['recall']:.4f}, F1: {fold_result['f1']:.4f}")
-
-                except Exception as e:
-                    print(f"  Error in fold {fold_idx + 1}: {e}")
-                    self.logger.error(f"Error in fold {fold_idx + 1}: {e}", exc_info=True)
-                    traceback.print_exc()
-                    fold_result = {
-                        "fold": fold_idx,
-                        "test_instances": len(test_instances),
-                        "accuracy": 0.0,
-                        "precision": 0.0,
-                        "recall": 0.0,
-                        "f1": 0.0,
-                    }
-                    fold_results.append(fold_result)
-                    test_sizes.append(len(test_instances))
-                    continue
+            # Unpack results
+            fold_results = []
+            test_sizes = []
+            for fold_result, test_size in fold_results_with_sizes:
+                fold_results.append(fold_result)
+                test_sizes.append(test_size)
+                print(
+                    f"  Fold {fold_result['fold'] + 1} - Accuracy: {fold_result['accuracy']:.4f} | "
+                    f"Precision: {fold_result['precision']:.4f} | Recall: {fold_result['recall']:.4f} | "
+                    f"F1: {fold_result['f1']:.4f}"
+                )
 
             # Aggregate results
             aggregated = self._aggregate_fold_results(fold_results)
@@ -599,10 +789,50 @@ class DataScarcityExperiment:
         print(f"✓ Saved detailed results: {detailed_file}")
         self.logger.info(f"Saved detailed results: {detailed_file}")
 
+        # CSV results file
+        csv_file = self.log_dir / f"{self.dataset_name}_results_single_tree_{self.config_name}.csv"
+        with open(csv_file, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(
+                [
+                    "dataset",
+                    "reduction_%",
+                    "avg_test_instances",
+                    "accuracy_mean",
+                    "accuracy_std",
+                    "precision_mean",
+                    "precision_std",
+                    "recall_mean",
+                    "recall_std",
+                    "f1_mean",
+                    "f1_std",
+                ]
+            )
+
+            for reduction_pct, metrics in self.results["results_by_reduction"].items():
+                writer.writerow(
+                    [
+                        self.dataset_name,
+                        reduction_pct.strip("%"),
+                        int(metrics.get("avg_test_instances", 0)),
+                        metrics.get("accuracy_mean", 0),
+                        metrics.get("accuracy_std", 0),
+                        metrics.get("precision_mean", 0),
+                        metrics.get("precision_std", 0),
+                        metrics.get("recall_mean", 0),
+                        metrics.get("recall_std", 0),
+                        metrics.get("f1_mean", 0),
+                        metrics.get("f1_std", 0),
+                    ]
+                )
+        print(f"✓ Saved CSV results: {csv_file}")
+        self.logger.info(f"Saved CSV results: {csv_file}")
+
         print(f"\n{'=' * 70}")
-        print(f"Experiment completed and results saved in: {self.log_dir}")
+        print(f"Experiment results saved in: {self.log_dir}")
         print("Files created:")
         print(f"  - {summary_file.name}")
+        print(f"  - {csv_file.name}")
         print(f"  - {detailed_file.name}")
         print(f"{'=' * 70}")
         self.logger.info(f"Experiment completed successfully")
@@ -627,6 +857,12 @@ def main():
         default="agg_all",
         help="Configuration name for file suffix (e.g., 'agg_all', 'exist_only')",
     )
+    parser.add_argument(
+        "--n-jobs",
+        type=int,
+        default=2,
+        help="Number of parallel workers for fold processing (default: 2)",
+    )
 
     args = parser.parse_args()
 
@@ -649,7 +885,7 @@ def main():
     for dataset in datasets:
         try:
             experiment = DataScarcityExperiment(
-                dataset, args.log_dir, use_original_folds=args.use_original_folds, config_name=args.config_name
+                dataset, args.log_dir, use_original_folds=args.use_original_folds, config_name=args.config_name, n_jobs=args.n_jobs
             )
             experiment.logger.info(f"Starting experiment for dataset: {dataset}")
             experiment.run_all_reductions()
