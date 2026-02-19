@@ -30,6 +30,20 @@ singularity exec ranking.sif python somescript.py --some_parameter --some_other_
 # Usage examples
 The series of core examples is available in the ./examples folder.
 
+# Experiments (data scarcity)
+For the complete guide to the `experiment/` pipeline (preprocessing, fold mapping, model runs, analysis), see:
+
+- `experiment/README.md`
+
+Quick start:
+
+```bash
+cd experiment
+python data_scarcity_preprocessing.py --dataset basket --seed 2864
+python fold_mapper.py --dataset basket
+python run_experiment_bagging.py --dataset basket --config-name agg_all --n-jobs 2
+```
+
 # A quick word about the method
 
 ## Relations
