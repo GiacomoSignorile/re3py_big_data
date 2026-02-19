@@ -30,7 +30,7 @@ singularity exec ranking.sif python somescript.py --some_parameter --some_other_
 # Usage examples
 The series of core examples is available in the ./examples folder.
 
-# Experiments (data scarcity)
+# Experiments (data reduction)
 For the complete guide to the `experiment/` pipeline (preprocessing, fold mapping, model runs, analysis), see:
 
 - `experiment/README.md`
