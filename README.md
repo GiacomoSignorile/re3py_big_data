@@ -41,7 +41,7 @@ Quick start:
 cd experiment
 python data_scarcity_preprocessing.py --dataset basket --seed 2864
 python fold_mapper.py --dataset basket
-python run_experiment_bagging.py --dataset basket --config-name agg_all --n-jobs 2
+python run_experiment_bagging_full_test.py --dataset basket --config-name agg_all --n-jobs 2
 ```
 
 # A quick word about the method
