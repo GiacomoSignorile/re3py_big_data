@@ -80,25 +80,25 @@ Main output:
 Bagging:
 
 ```bash
-python run_experiment_bagging.py --dataset basket --config-name agg_all --n-jobs 2
+python run_experiment_bagging_full_test.py --dataset basket --config-name agg_all --n-jobs 2
 ```
 
 Random Forest:
 
 ```bash
-python run_experiment_random_forest.py --dataset basket --config-name agg_all --n-jobs 2
+python run_experiment_random_forest_full_test.py --dataset basket --config-name agg_all --n-jobs 2
 ```
 
 Boosting:
 
 ```bash
-python run_experiment_boosting.py --dataset basket --config-name agg_all
+python run_experiment_boosting_full_test.py --dataset basket --config-name agg_all
 ```
 
 Single Tree:
 
 ```bash
-python run_experiment_single_tree.py --dataset basket --config-name agg_all --n-jobs 2
+python run_experiment_single_tree_full_test.py --dataset basket --config-name agg_all --n-jobs 2
 ```
 
 Main output:
